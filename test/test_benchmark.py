@@ -128,7 +128,7 @@ steady_benchmarks = {
 #%%
 letter = 'abcdefghijklmnopqrstuvwxyz'
 def test_steady(makefigure=False):
-#%%
+
     np.random.seed(2)
     timeseries_length = 100
     max_age = timeseries_length
@@ -377,7 +377,7 @@ def analytical_set(df, S_init = 1000., C_old = 50., dt=1):
     return C_Q
 
 def test_unsteady_uniform(makefigure=False, tmax=500):
-#%%
+
     data_df = pd.read_csv('./test/unsteady_data.csv')
     data_df = data_df[:tmax]
     data_df['Q'] = data_df['Q'] + data_df['ET']
@@ -440,7 +440,7 @@ def test_unsteady_uniform(makefigure=False, tmax=500):
 # %%
 
 def test_part_multiple(makefigure=False):
-#%%
+
     timeseries_length = 300
     max_age = timeseries_length
     dt = 0.1
@@ -541,7 +541,7 @@ def test_part_multiple(makefigure=False):
 # %%
 
 def test_reaction(makefigure=False):
-#%%
+
     u = 1 # No effect
     v = 1 # No effect
     timeseries_length = 500
@@ -637,3 +637,4 @@ if __name__=='__main__':
     test_unsteady_uniform(makefigure=True)
     test_part_multiple(makefigure=True)
     test_reaction(makefigure=True)
+# %%
