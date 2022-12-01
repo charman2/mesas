@@ -70,6 +70,7 @@ class Model:
         }
         self._options = self._default_options
         components_to_learn = kwargs.get('components_to_learn')
+        # process configuration
         if config and 'options' in config.keys():
             self.options = config['options']
         self.options = kwargs
@@ -84,10 +85,10 @@ class Model:
         self._numflux = len(self.sas_specs)
         self._fluxorder = list(self.sas_specs.keys())
         # get solute transport parameters
-        if config and 'solute_parameters' in config.keys():
-            solute_parameters = config['solute_parameters']
-        elif solute_parameters:
+        if solute_parameters:
             solute_parameters = _processinputs(solute_parameters)
+        elif config and 'solute_parameters' in config.keys():
+            solute_parameters = config['solute_parameters']
         # defaults for solute transport
         self._default_parameters = {
             'mT_init': 0.,
@@ -530,9 +531,12 @@ class Model:
         X = self.result['pQ'][:,:,iflux]
         return self._get_result(X, **kwargs)
 
-    def get_mT(self, sol, **kwargs):
-        isol = list(self._solorder).index(sol)
-        X = self.result['mT'][:,:,isol]
+    def get_mT(self, sol=None, **kwargs):
+        if sol:
+            isol = list(self._solorder).index(sol)
+            X = self.result['mT'][:,:,isol]
+        else:
+            X = self.result['mT']
         return self._get_result(X, **kwargs)
 
     def get_CT(self, sol, **kwargs):
