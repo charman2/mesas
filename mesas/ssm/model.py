@@ -8,7 +8,8 @@ from typing import List
 import math
 from sklearn.linear_model import LinearRegression
 
-from mesas.sas.model import Model
+from mesas.sas.model import Model as sas_Model
+from mesas.sas.model import _processinputs
 # %%
 # TODO: segmentate the model data
 """
@@ -54,11 +55,8 @@ from ssm_utils import transition_model,observation_model,f_theta,g_theta
 # other quick utils
 from ssm_utils import cal_distn, cal_CI
 
-class SSM_frame(Model):
-    def __init__(self, data_df: pd.DataFrame, data_obs: pd.DataFrame, solute_parameters: dict,\
-        sas_specs: dict, M:int, dT: int, dt: float = 1,\
-        n_substeps: int = 1, debug: bool = False, verbose: bool = False,\
-        jacobian: bool = False, makefigure: bool = True, warning: bool = True) -> None:
+class Model(sas_Model):
+    def __init__(self, *args, num_solute_ensemble:int=1, num_sas_ensemble:int=1, block_size: int=1, **kwargs) -> None:
         """
             input:  data_df: all data that MESAS needs
                     solute_parameter: specify solute parameters
@@ -69,42 +67,65 @@ class SSM_frame(Model):
         """
         # TODO: maybe inherit Class Model here??
         # parameters related to data
-        self.data_df = data_df
-        self.data_obs = data_obs # same shape as data_df, may only have data at dT
-        self.solute_parameters = solute_parameters
-        self.sas_specs = sas_specs
-        self.sol_names = list(self.solute_parameters.keys())
-        self.flux_names = list(self.sas_specs.keys())
-        self.dT = dT
-        self.dt = dt
-        self.M = M
-        # parameters related to structure
-        self.n_substeps = n_substeps
-        self.verbose = verbose
-        self.debug = debug
-        self.jacobian = jacobian
-        self.makefigure = makefigure
-        self.warning = warning
-        # paratmeters related to finer adjustments
-        self.max_age = self.data_df.shape[0] # this will be the input matrix len
-        # other parameters will be updated later during processes
-        self.model = None
-        self.params_f = [] # params for f
-        self.params_g = [] # params for g
-        self.m_T_hat = {} # store all C_old for different solutes
-        self.A = {}
-        self.W = {}
-        for s in self.sol_names:
-            self.A[s] = [np.arange(self.M)] # ancestor resampling for each stage
-            # W: M x max_age
-            self.W[s] = [np.ones((self.M,self.max_age))/self.M] # initial weight on particles are all equal
-            if isinstance(solute_parameters[s]['C_old'],float) == True:
-                # m_T_hat: # particles * C_old distribution
-                self.m_T_hat[s] = [solute_parameters[s]['C_old']*np.ones((self.M,self.max_age))]
-            else:
-                self.m_T_hat[s] = [solute_parameters[s]['C_old']]
+
+        self._block_size = block_size
+        self._num_solute_ensemble = num_solute_ensemble
+        self._num_sas_ensemble = num_sas_ensemble
+
+        if "solute_parameters" in kwargs:
+            solute_parameters = _processinputs(kwargs.pop("solute_parameters"))
+        elif "config" in kwargs:
+            config = _processinputs(kwargs.pop("config"))
+            solute_parameters = config['solute_parameters']
+        else:
+            raise ValueError("No solute_parameters found!")
+        self._sas_numsol = len(solute_parameters)
+        self._sas_solnames = list(solute_parameters.keys())
+        ssm_solute_parameters = {}
+        for sol_name in self._sas_solnames:
+            for m in range(self._num_solute_ensemble):
+                new_sol_name = sol_name + " sol ensemble member " + m
+                ssm_solute_parameters[new_sol_name] = solute_parameters[sol_name]
+
+        kwargs["solute_parameters"] = ssm_solute_parameters
+
+        super().__init__(*args, **kwargs)
+
+        self._num_blocks = np.ceil(self._timeseries_length/self.block_size)
+
+        # A records the geneology of the ancestor sampling
+        self.A = np.zeros((self._num_blocks+1, self._num_sas_ensemble, self._num_solute_ensemble, self._sas_numsol), dtype=int)
+        self.W_sol = np.zeros((self._num_blocks+1, self._num_sas_ensemble, self._num_solute_ensemble, self._sas_numsol), dtype=float)
+        self.W_sas = np.zeros((self._num_blocks+1, self._num_sas_ensemble), dtype=float)
+
+        for b in range(self._num_sas_ensemble):
+            self.A[0,b,:,:] = range(self._num_solute_ensemble)
+            self.W_sol[0,b,:,:] = 1./self._num_solute_ensemble
+            self.W_sas[0,b] = 1./self._num_sas_ensemble
+        #self.params_f = [] # params for f
+        #self.params_g = [] # params for g
+        #self.m_T_hat = {} # store all C_old for different solutes
+    
+    def transition_model(self, block_model, i):
+        # update the block model data for the new block
+        block_model.data_df = self.data_df[self.block_size*i:self.block_size*(i+1)]
+
+        # Add stochastic error to the solute input
+        for sol_name in self._sas_solnames:
+            for m in range(self._num_solute_ensemble):
+                new_sol_name = sol_name + " sol ensemble member " + m
+                block_model.data_df[new_sol_name] = self._generate_input_error(block_model, sol_name)
+                # TODO: make self._generate_input_error
+
+        #update the block model initial conditions using 
+        block_model.sT_init = block_model.get_sT(timestep=-1)
+        block_model.mT_init = block_model.get_mT(timestep=-1)
+        block_model.max_age = np.min(self._block_size * (i+1), self._timeseries_length)
+
+        return block_model.run()  
+
     # running the actual model
-    def run_sMC(self, params_f: dict, params_g: dict):
+    def run_sMC(self):
         '''
             Input:  params_f: parameters for state transition process
                     params_g: parameters for observation process
@@ -113,66 +134,32 @@ class SSM_frame(Model):
         
         '''
         # for each time segment to run MESAS
-        for i in range(int(np.ceil(self.max_age/self.dT))):
+        #block_models = [self.copy_without_results(self) for i in self._num_sas_ensemble]
+
+        block_model = self.copy_without_results(self)
+        b = 0
+
+        for i in range(self._numblocks):
             # data is chopped
-            data_chunk = self.data_df[self.dT*i:self.dT*(i+1)]
 
+            if i>0:
             # resampling step: choose particles according to last step
-            for s in self.sol_names:
-                # sampling from ancestor based on previous weight
-                aa = cal_distn(self.W[s][-1],self.A[s][-1], num = len(self.W[s][-1]))
-                self.A[s].append(aa)
-                # draw new state samples and associated weights based on last segment
-                # TODO: check this may not need update...cuz aa is saved
-                # self.m_T_hat[s][-1] = self.m_T_hat[s][-1][aa] # mT hat at time t, last c_old
-                # self.W[s][-1] = self.W[s][-1][aa] # w hat at time t, sample 
-            # TODO: consider randomness within precipitation
+                for s in self._solorder:
+                    # sampling from ancestor based on previous weight
+                    self.A[i+1,b,:,s] = cal_distn(self.W_sol[i,b,:,s],self.A[i,b,:,s], num = self._num_solute_ensemble) 
+            else:
+                self.A[i+1,b,:,s] = range(self._num_solute_ensemble)
 
+            block_model = transition_model(self, block_model, i)
 
+            # update weights using the observation model
+            for s in self._solorder:
+                for m in range(self._num_solute_ensemble):
+                    ancestor = self.A[i+1,b,m,s]
+                    self.W_sol[i+1,b,m,s] = self.W_sol[i,b,ancestor,s] * self.g_theta(block_model)
+                # normalize
+                self.W_sol[i+1,b,:,s] = self.W_sol[i+1,b,:,s]/self.W_sol[i+1,b,:,s].sum()
 
-            # run MESAS for each particle, the randomness is within the the C_old estimation            
-            for j in range(self.M):
-                # First, update C_old for each [chunk] and each [particle]
-                for s in self.sol_names:
-                    # this is the C_old for max_age length, full history
-                    aa = self.A[s][-1]
-                    # update all C_old for all solutes in this particle
-                    self.solute_parameters[s]['C_old'] = self.m_T_hat[s][-1][aa][j]
-                    # TODO: add flexibility for solute parameters
-
-                # run the MESAS model
-                self.model = Model(
-                    data_chunk,
-                    sas_specs=self.sas_specs,
-                    solute_parameters=self.solute_parameters,
-                    debug=self.debug,
-                    verbose=self.verbose,
-                    dt=self.dt,
-                    n_substeps=self.n_substeps,
-                    jacobian=self.jacobian,
-                    max_age=self.max_age,
-                    warning=self.warning
-                )
-                self.model.run()  
-                # now we have MESAS result for one particle
-
-                # update info on each solute
-                for s in self.sol_names:
-                    # compute new state and weights based on the model
-                    mTp1 = transition_model(self.model,s) # the end state of m_T
-                    self.m_T_hat[s].append(mTp1)
-                    # compute weight
-                    # TODO: add multiple fluxes, currently only one flux
-                    for f in self.flux_names:
-                        whtp1 = self.W[s][-1][aa] * g_theta(self.model, s,f, params_g[s], pdf_x = self.data_obs[s][self.dT*(i+1)-1], distribution = "normal")
-                        whtp1 = whtp1/whtp1.sum() # normalize
-                    self.W[s].append(whtp1)
-
-        # remove auxillary parts
-        for s in self.sol_names:
-            self.m_T_hat[s] = np.array(self.m_T_hat[s])[1:]
-            self.W[s] = np.array(self.W[s])[1:]
-            self.A[s] = np.array(self.A[s])[1:]
         return
 
     def run_pMCMC(self,params_f: dict, params_g: dict,nstep: int):
@@ -182,7 +169,7 @@ class SSM_frame(Model):
             theta           - let it be params_f, params_g for now
             nstep           - number of steps in MCMC            
         '''
-        T = int(np.ceil(self.max_age/self.dT)) # the number of chunks in time
+        T = int(np.ceil(self.max_age/self.block_size)) # the number of chunks in time
         p_theta_y = {}
         # for each solute
         for s in self.sol_names:
@@ -192,12 +179,12 @@ class SSM_frame(Model):
             for i in reversed(range(1,T)):
                 B[i-1] =  self.A[s][i][B[i]]
             # B is the current lineage for current solute
-            notB = np.arange(0,self.M)!=B[0]
+            notB = np.arange(0,self.num_particles)!=B[0]
             # save distribution
             p_theta_y[s] = 0
             # for each time chunk-------------------------------
             for t in range(1,T):
-                notB = np.arange(0,self.M)!=B[t] # sample states at last time step [t-1]
+                notB = np.arange(0,self.num_particles)!=B[t] # sample states at last time step [t-1]
                 # sampling from ancestor based on previous weight
                 aa = cal_distn(P[t-1],A[t-1], num = len(notB)-1)
                 self.A[s][t][notB] = aa
