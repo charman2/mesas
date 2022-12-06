@@ -75,7 +75,7 @@ def g_theta(model: Model, sol:str,flux:str, params: List[float], pdf_x, distribu
     return stats_model.pdf(pdf_x)
 # %%
 # calculate discrete inverse transform sampling, no close form
-def cal_distn(pmf: List[float],x: List[float],num: int = 1):
+def pmf_inv(pmf: List[float],x: List[float],num: int = 1):
     '''
         give x ~ pmf
         num: number of samples needed, default set to 1
