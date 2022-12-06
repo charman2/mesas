@@ -500,6 +500,15 @@ class Model:
                             index = np.concatenate((index, this_index), axis=0)
         return np.nonzero(index)[0]
 
+    def obs_interval(self,k):
+        """returns the range of indicies in data_df just prior to observation k"""
+        if not self._obs_ind:
+            self._obs_ind = self.get_obs_ind()
+        if k==0:
+            return np.arange(0, self._obs_ind[0])
+        else:
+            return np.arange(self._obs_ind[k-1],self._obs_ind[k])+1
+
     def _get_result(self, X, timestep=None, agestep=None, inputtime=None):
         if not timestep is None:
             # Only one can be given

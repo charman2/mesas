@@ -52,7 +52,7 @@ from mesas.sas.model import _processinputs
 # models
 from ssm_utils import transition_model,observation_model,f_theta,g_theta
 # other quick utils
-from ssm_utils import cal_distn, cal_CI
+from ssm_utils import pmf_inv, cal_CI
 
 class Model(sas_Model):
     def __init__(self, *args, obs:dict, num_solute_ensemble:int=1, num_sas_ensemble:int=1, \
@@ -101,46 +101,56 @@ class Model(sas_Model):
         #self.params_g = [] # params for g
         #self.m_T_hat = {} # store all C_old for different solutes
         
-    def _generate_input_error(self,model, sol_name, distribution = "normal",params = 0.01):
-        if distribution == "normal":
-            return ss.norm(model.data_df[f'{sol_name}'].values,params).rvs()
-        else:
-            raise ValueError("This distribution has not been implemented yet!") 
+    def input_model(self, params={"mode":"white","distribution":"normal","sig":0.01}):
 
-    def transition_model(self, block_model, i, precip_distribution: str = "normal"):
-        # update the block model data for the new block
-        block_model.data_df = self.data_df[self._block_size*i:self._block_size*(i+1)]
-
-        # Add stochastic error to the solute input
-        if precip_distribution == "GP":
+                # Add stochastic error to the solute input
+        if params.mode == "GP":
             # Gaussian process result will be included in input file
             pass
-        else:    
+        elif params.mode == "white":
             for sol_name in self._sas_solnames:
                 for m in range(self._num_solute_ensemble):
                     new_sol_name = sol_name + " sol ensemble member " + m
-                    block_model.data_df[new_sol_name] = self._generate_input_error(block_model, sol_name, precip_distribution)
-    
+                    if params.distribution == "normal":
+                        C_J_m = ss.norm(self.data_df[sol_name].values, params.sig).rvs()
+                        self.data_df[new_sol_name] =  C_J_m
+                    else:
+                        raise ValueError("This distribution has not been implemented yet!")  
+        raise ValueError("Input model not implemented yet!") 
+
+    def get_block_ind(self, k):
+        return np.arange(self._block_size*(k-1),self._block_size*(k))+1
+
+    def transition_model(self, block_model, k, input_model_params=None, transition_model_params=None):
+        # update the block model data for the new block
+        block_model.data_df = self.data_df[self.get_block_ind(k)]
+
+        # Ask the block model to generate input scenarios
+        block_model.input_model(input_model_params)
 
         #update the block model initial conditions using 
         block_model.sT_init = block_model.get_sT(timestep=-1)
         block_model.mT_init = block_model.get_mT(timestep=-1)
-        block_model.max_age = np.min(self._block_size * (i+1), self._timeseries_length)
+        block_model.max_age = np.min(self._block_size * k, self._timeseries_length)
 
-        return block_model.run()
+        block_model.run()
+        block_model.get_residuals()
+
+        return block_model
     
-    def g_theta(self, block_model,sig_v):
-        pdf = np.zeros((self._numflux,self._numsol,self._num_solute_ensemble))
-        for i,flux_name in enumerate(self._fluxorder):
-            for j,sol_name in enumerate(self._sas_solnames):
-                for m in range(self._num_solute_ensemble):
-                    new_sol_name = sol_name + " sol ensemble member " + m
-                    C_q_hat = block_model.data_df[f'{new_sol_name} --> {flux_name}']
-                    C_q = self.obs[f'{flux_name}']
-                    pdf[i,j,m] = ss.norm(C_q,sig_v).pdf(C_q_hat)
-        return pdf
+    def observation_model(self, block_model,obs_model_params):
+        likelihood = np.ones((self._num_solute_ensemble, self._numsol))
+        for isol, sol in enumerate(self._solorder):
+            if 'observations' in self.solute_parameters[sol]:
+                for iflux, flux in enumerate(self._comp2learn_fluxorder):
+                    if flux in self.solute_parameters[sol]['observations']:
+                        obs = self.solute_parameters[sol]['observations'][flux]
+                    residual = self.data_df[f'residual {flux}, {sol}, {obs}']
+                    likelihood[:,isol] = likelihood[:,isol] * ss.norm(0,obs_model_params.sig_v).pdf(residual)
+        return likelihood
+
     # running the actual model
-    def run_sMC(self):
+    def run_sMC(self, input_model_params=None, obs_model_params=None, transition_model_params=None):
         '''
             Input:  params_f: parameters for state transition process
                     params_g: parameters for observation process
@@ -154,27 +164,21 @@ class Model(sas_Model):
         block_model = self.copy_without_results()
         b = 0
 
-        for i in range(self._num_blocks):
+        for k in range(1, self._num_blocks+1):
             # data is chopped
 
-            if i>0:
-            # resampling step: choose particles according to last step
-                for s in self._solorder:
-                    # sampling from ancestor based on previous weight
-                    self.A[i+1,b,:,s] = cal_distn(self.W_sol[i,b,:,s],self.A[i,b,:,s], num = self._num_solute_ensemble) 
-            else:
-                self.A[i+1,b,:,s] = range(self._num_solute_ensemble)
+            for s in self._solorder:
+                # sampling from ancestor based on previous weight
+                self.A[k,b,:,s] = pmf_inv(self.W_sol[k-1,b,:,s],self.A[k-1,b,:,s], num = self._num_solute_ensemble) 
 
-            block_model = transition_model(self, block_model, i)
+            block_model = self.transition_model(block_model, k, input_model_params)
 
             # update weights using the observation model
-            for s in self._solorder:
-                for m in range(self._num_solute_ensemble):
-                    ancestor = self.A[i+1,b,m,s]
-                    # TODO: double check the dimension for g_theta
-                    self.W_sol[i+1,b,m,s] = self.W_sol[i,b,ancestor,s] * self.g_theta(block_model,self.sig_v)
-                # normalize
-                self.W_sol[i+1,b,:,s] = self.W_sol[i+1,b,:,s]/self.W_sol[i+1,b,:,s].sum()
+            ancestors = self.A[k,b,:,:]
+            # TODO: double check the dimension for g_theta
+            self.W_sol[k,b,:,:] = self.W_sol[k-1,b,ancestors,:] * block_model.observation_model(obs_model_params)
+            # normalize
+            self.W_sol[k,b,:,:] = self.W_sol[k,b,:,:]/self.W_sol[k,b,:,:].sum(axis=-2)
 
         return 
 
@@ -191,7 +195,7 @@ class Model(sas_Model):
         for s in range(self._sas_numsol):
             # sample an ancestral path based on final weight
             B = np.zeros(self._num_blocks).astype(int)
-            B[-1] = cal_distn(self.W_sol[-1,b,:,s], self.get_mT(timestep=-1),num = 1)
+            B[-1] = pmf_inv(self.W_sol[-1,b,:,s], self.get_mT(timestep=-1),num = 1)
             for t in reversed(range(self._num_blocks-1)):
                 B[t-1] = self.A[t,b,B[t],s]
             # B is the current lineage for current solute
@@ -203,7 +207,7 @@ class Model(sas_Model):
             for t in range(self._num_blocks):
                 notB = np.arange(0,self.num_particles)!=B[t] # sample states at last time step [t-1]
                 # sampling from ancestor based on previous weight
-                aa = cal_distn(self.W_sol[t+1,b,:,s], self.get_mT(timestep=t+1), num = len(notB)-1)
+                aa = pmf_inv(self.W_sol[t+1,b,:,s], self.get_mT(timestep=t+1), num = len(notB)-1)
                 self.A[t,b,notB,s] = aa
                 # mix chain 0:t with B t:T_max
                 cq_hat[:,notB,s] = np.concatenate((self.data_df[f'{self.sol_order[notB]} --> {self.flux_order}'].values[:t+1][aa],\
