@@ -87,6 +87,15 @@ class Model(sas_Model):
 
         super().__init__(*args, **kwargs)
 
+        # Create a thing called self._m_solorder that will be useful later
+        # This stores the index of a solute ensemble member in the _solorder
+        self._m_solorder = np.zeros(self._sas_numsol)
+        for sol in self._sas_solnames:
+            self._m_solorder[sol] = np.zeros(self._num_solute_ensemble)
+            for m in range(self._num_solute_ensemble):
+                new_sol_name = sol_name + " sol ensemble member " + m
+                self._m_solorder[sol][m] = list(self._solorder).index(new_sol_name)
+
         self._num_blocks = np.ceil(self._timeseries_length/self._block_size)
 
         # A records the geneology of the ancestor sampling
@@ -121,17 +130,23 @@ class Model(sas_Model):
     def get_block_ind(self, k):
         return np.arange(self._block_size*(k-1),self._block_size*(k))+1
 
-    def transition_model(self, block_model, k, input_model_params=None, transition_model_params=None):
+    def transition_model(self, block_model, k, ancestors, input_model_params=None, transition_model_params=None):
         # update the block model data for the new block
         block_model.data_df = self.data_df[self.get_block_ind(k)]
+        block_model.max_age = np.min(self._block_size * k, self._timeseries_length)
 
         # Ask the block model to generate input scenarios
         block_model.input_model(input_model_params)
 
         #update the block model initial conditions using 
         block_model.sT_init = block_model.get_sT(timestep=-1)
-        block_model.mT_init = block_model.get_mT(timestep=-1)
-        block_model.max_age = np.min(self._block_size * k, self._timeseries_length)
+
+        # Shuffle the initial conditions according to the ancestor resampling
+        mT_prev = block_model.get_mT(timestep=-1)
+        for sol in self._sas_solnames:
+            for m in range(self._num_solute_ensemble):
+                block_model.mT_init[:,self._m_solorder[sol][m]] = mT_prev[:,ancestors[self._m_solorder[sol][m]]]
+
 
         block_model.run()
         block_model.get_residuals()
@@ -167,14 +182,14 @@ class Model(sas_Model):
         for k in range(1, self._num_blocks+1):
             # data is chopped
 
-            for s in self._solorder:
+            for isol, sol in enumerate(self._solorder):
                 # sampling from ancestor based on previous weight
-                self.A[k,b,:,s] = pmf_inv(self.W_sol[k-1,b,:,s],self.A[k-1,b,:,s], num = self._num_solute_ensemble) 
+                self.A[k,b,:,isol] = pmf_inv(self.W_sol[k-1,b,:,isol],self.A[k-1,b,:,isol], num = self._num_solute_ensemble) 
+            ancestors = self.A[k,b,:,:]
 
-            block_model = self.transition_model(block_model, k, input_model_params)
+            block_model = self.transition_model(block_model, k, ancestors, input_model_params)
 
             # update weights using the observation model
-            ancestors = self.A[k,b,:,:]
             # TODO: double check the dimension for g_theta
             self.W_sol[k,b,:,:] = self.W_sol[k-1,b,ancestors,:] * block_model.observation_model(obs_model_params)
             # normalize
