@@ -12,57 +12,46 @@ from mesas.sas.model import Model as sas_Model
 from mesas.sas.model import _processinputs
 # %%
 """
-# model structure notes
+# MODEL STRUCTURE NOTE
 
-    Considering for MESAS:
-    m_T|m_0 = model.get_mT(model.solorder) at the last timestep T
+* Observation
     C_Q | m_T = model.data_df['C --> Uniform']
     Goal: use particle filter to estimate theta
-
-    Problem:
-        current m_T|m_0 have no randomness:
-        will it be possible to just run C_Q|m_T ???
 
 """
 # %%
 '''
-# util function structure notes
+# SECTION FOR ALGO NOTE
 
-1. I need a function to get m_T at the end of each timestep
---> this is my transition_model()
-    --> this result will be use to initiate the next timestep
---> integrate prob dist'n using f_theta():
-    --> currently normal, need improvement
-    --> parameter, sig_v
-
-2. I need a function to get c_Q at the end of each timestep
---> this is my observation_model()
---> this result is the actual estimation using m_T = f_theta(*)
-    and will be compared with the model
---> prob dist'n will be estimate using g_theta()
-    --> 
-
-3. I need a function/wrapper to provide MESAS info at each timestep
 '''
 
     
 
 # %%   
 # MODEL part
-# models
-from ssm_utils import transition_model,observation_model,f_theta,g_theta
 # other quick utils
 from ssm_utils import pmf_inv, cal_CI
 
 class Model(sas_Model):
-    def __init__(self, *args, obs:dict, num_solute_ensemble:int=1, num_sas_ensemble:int=1, \
+    def __init__(self, *args, obs:dict, theta_0: dict, num_solute_ensemble: int=1, num_sas_ensemble: int=1, \
          block_size: int=1, sig_v: float = 0.001,  **kwargs) -> None:
         """
-            input:  
+            Analysis of dimensions of the models:
+            For D replicated of theta we have:
+                For each flux q and each observation o at given theta:
+                    generate N particles corresponding to precipitation
+            ===========================================================
+            +   sig_v - observation uncertainty, currently specified by users but infuture train with theta
+            +   obs - observations of outflux concentrations 
+            +   theta0 - initial guess on all thetas
+            +   _block_size - this should be concordant with irregular observation in the future. Now it should be 
+            +   _num_solute_ensemble - 
+            +   _num_sas_ensemble - 
         """
         # parameters related to data
         self.sig_v = sig_v
         self.obs = obs
+        self.theta_0 = theta_0
 
         self._block_size = block_size
         self._num_solute_ensemble = num_solute_ensemble
@@ -131,6 +120,10 @@ class Model(sas_Model):
         return np.arange(self._block_size*(k-1),self._block_size*(k))+1
 
     def transition_model(self, block_model, k, ancestors, input_model_params=None, transition_model_params=None):
+        """
+        For solute o at flux q
+            m_T^{k}|m_T^{k-1} = model.get_mT(model.solorder) 
+        """
         # update the block model data for the new block
         block_model.data_df = self.data_df[self.get_block_ind(k)]
         block_model.max_age = np.min(self._block_size * k, self._timeseries_length)
@@ -181,7 +174,6 @@ class Model(sas_Model):
 
         for k in range(1, self._num_blocks+1):
             # data is chopped
-
             for isol, sol in enumerate(self._solorder):
                 # sampling from ancestor based on previous weight
                 self.A[k,b,:,isol] = pmf_inv(self.W_sol[k-1,b,:,isol],self.A[k-1,b,:,isol], num = self._num_solute_ensemble) 
@@ -190,7 +182,6 @@ class Model(sas_Model):
             block_model = self.transition_model(block_model, k, ancestors, input_model_params)
 
             # update weights using the observation model
-            # TODO: double check the dimension for g_theta
             self.W_sol[k,b,:,:] = self.W_sol[k-1,b,ancestors,:] * block_model.observation_model(obs_model_params)
             # normalize
             self.W_sol[k,b,:,:] = self.W_sol[k,b,:,:]/self.W_sol[k,b,:,:].sum(axis=-2)
@@ -234,8 +225,9 @@ class Model(sas_Model):
             self.W_sol[:,b,:,:] = py
         return cq_hat, py
 
-    def run_pMMH(self, params: List[float], chain_len: int = 50, sig_v0: float = 0.001):
+    def run_GS(self, params: List[float], chain_len: int = 50, sig_v0: float = 0.001):
         """ 
+            This is the model to run from parameters
             initial guess of parameters: params
             chain_len: evolution steps of MCMC chain
         """
