@@ -33,7 +33,7 @@ from mesas.sas.model import _processinputs
 from ssm_utils import pmf_inv, cal_CI
 
 class Model(sas_Model):
-    def __init__(self, *args, obs:dict, theta_0: dict, num_solute_ensemble: int=1, num_sas_ensemble: int=1, \
+    def __init__(self, *args, obs:dict, num_solute_ensemble: int=1, num_sas_ensemble: int=1, \
          block_size: int=1, sig_v: float = 0.001,  **kwargs) -> None:
         """
             Analysis of dimensions of the models:
@@ -42,16 +42,31 @@ class Model(sas_Model):
                     generate N particles corresponding to precipitation
             ===========================================================
             +   sig_v - observation uncertainty, currently specified by users but infuture train with theta
+                        dict{"sol_name": sig_v}
             +   obs - observations of outflux concentrations 
-            +   theta0 - initial guess on all thetas
-            +   _block_size - this should be concordant with irregular observation in the future. Now it should be 
-            +   _num_solute_ensemble - 
-            +   _num_sas_ensemble - 
+                        dict{"sol_name": obs}
+            +   _block_size - this should be concordant with irregular observation in the future. 
+                              Now it is simply a timestep to compare against observation
+                        int: # of timesteps for a block
+            +   _num_blocks: should be concordant with observation
+                        int: # of calibration timesteps
+            +   _num_solute_ensemble - total number of particles for each solutes --> input uncertianty
+                        int: N
+            +   _num_sas_ensemble - total number of sas functions --> parameter uncertainty
+                        int: D
+            +   _sas_numsol - total number of solutes
+                        int: Q
+                +   _sas_solnames:  list(1, ..., q, ..., Q)
+            +   ssm_solute_parameters - initial guess on all pass to the function through kwags 
+                        dict: {"sol_name for replicate 1"}: parameter for sol m  
+                        dict key size = Q x D
+            +
+
+
         """
         # parameters related to data
         self.sig_v = sig_v
         self.obs = obs
-        self.theta_0 = theta_0
 
         self._block_size = block_size
         self._num_solute_ensemble = num_solute_ensemble
@@ -64,13 +79,16 @@ class Model(sas_Model):
             solute_parameters = config['solute_parameters']
         else:
             raise ValueError("No solute_parameters found!")
+
         self._sas_numsol = len(solute_parameters)
         self._sas_solnames = list(solute_parameters.keys())
+
+        # set up parameter format
         ssm_solute_parameters = {}
         for sol_name in self._sas_solnames:
-            for m in range(self._num_solute_ensemble):
-                new_sol_name = sol_name + " sol ensemble member " + m
-                ssm_solute_parameters[new_sol_name] = solute_parameters[sol_name]
+            for m in range(self._num_sas_ensemble):
+                new_sol_name = sol_name + " sas ensemble member " + m
+                ssm_solute_parameters[new_sol_name] = solute_parameters[sol_name] 
 
         kwargs["solute_parameters"] = ssm_solute_parameters
 
