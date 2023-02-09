@@ -120,13 +120,14 @@ class Model(sas_Model):
             self.A[0,d,:,:] = range(self._num_solute_ensemble)
             self.W[d,:,:] = 1./self._num_solute_ensemble
         # store X
-        # for sT: (K+1) x D x N
-        self.all_sT =  np.zeros((self._num_blocks+1, self._num_sas_ensemble, self._num_solute_ensemble), dtype=int)
-        # for mT: (K+1) x D x N x O
-        self.all_mT =  np.zeros((self._num_blocks+1, self._num_sas_ensemble, self._num_solute_ensemble, self._sas_numsol), dtype=int)
+        # TODO: for CT: total length x D x N x O, I don't actually need this, I can use A to trace it???
+        # self.all_CT =  np.zeros((self._timeseries_length, self._num_sas_ensemble, self._num_solute_ensemble, self._sas_numsol), dtype=int)
 
         # specify Z # TODO: what's the best way to pass observation into the model
         self.Cqo = obs
+
+        # store reference trajectory: total length x D x O
+        self.ref_traj = np.zeros((self._timeseries_length, self._num_sas_ensemble, self._num_solute_ensemble), dtype=int)
 
     # %%
     # =========================
@@ -161,7 +162,9 @@ class Model(sas_Model):
                         # suppose all parameters follow a normal distribution
 
                         pass
-        else: 
+        else:
+            # TODO: write function to return pdf, depends on the parameter
+            pass
 
         return
 
@@ -171,7 +174,7 @@ class Model(sas_Model):
             and then output theta_MAP
             theta_candidates:
                 samples of theta (sas scenarios) passed to the model
-                 _num_sas_ensemble (D) x _sas_numsol (O)
+                 _num_sas_ensemble (D) x _sas_numsol (O) (x number of parameters to be estimated) --> not implemented yet
 
         '''
         # to think about this simply, we made 1, ..., o,..., O measurements of solute o
@@ -186,8 +189,8 @@ class Model(sas_Model):
             for d in range(self._num_sas_ensemble): 
                 W_temp[d,:,sol] = self.W[d,:,sol]*p_theta_temp[d,sol]
             ind_MAP = np.argmax(W_temp[d,:,sol].ravel)
-            # TODO: this needs more work regarding the shape of theta
-            theta_MAP[sol] = theta_candidates[(ind_MAP)//self._num_solute_ensemble,sol]
+            # TODO: this needs more work regarding the shape of theta, possible a parameter wrapper function            
+            theta_MAP[sol] = theta_candidates[(ind_MAP)//self._num_solute_ensemble,sol,:] 
         return theta_MAP
 
 
@@ -222,7 +225,85 @@ class Model(sas_Model):
             self.run_pGAS(theta_new.input_model_params,theta_new.obs_model_params,theta_new.transit_model_params)
             self.theta[l] = self.W_wrapper()
         return
-                                                                                                                                                                
+    # %%
+    # =========================
+    # Algo: sequential Monte Carlo part
+    # =========================
+
+    def input_model(self, input_model_params={"mode":"noise","distribution":"normal","params":0.01}):
+        '''
+            input data: self.data_df[sol_name]
+            mode:
+                + GP:   Gaussian Process TODO: using processed input data
+                + noise:
+                    - distribution: currently, normal distribution
+                    - params: sigma for normal distribution
+        '''
+
+        # Add stochastic error to the solute input
+        if input_model_params.mode == "GP":
+            # Gaussian process result will be included in input file
+            # TODO: sample N samples from GP input
+            # TODO: what's the best way to incoorporate GP into this??
+            pass
+
+        # use white noise around average
+        elif input_model_params.mode == "noise":
+            for sol_name in self._sas_solnames:
+                # for each input solutes
+                for n in range(self._num_solute_ensemble):
+                    new_sol_name = sol_name + " sol ensemble member " + n
+                    # add a random normal noise on C_J
+                    if input_model_params.distribution == "normal":
+                        # TODO: this name may not be correct! Double check!!!!!!!!---------------------------------------------------------
+                        C_J_m = ss.norm(self.data_df[sol_name].values, input_model_params.params).rvs() # this should have the same length as block model length 
+                        self.data_df[new_sol_name] =  C_J_m
+                    else:
+                        raise ValueError("This distribution has not been implemented yet!")  
+        raise ValueError("Input model not implemented yet!") 
+
+    def get_block_ind(self, k):
+        # TODO: in future 
+        return np.arange(self._block_size*(k-1),self._block_size*(k))+1
+
+    def transition_model(self, block_model, k, ancestors, input_model_params=None, transition_model_params=None):
+        """
+        For solute o at flux q
+            m_T^{k}|m_T^{k-1} = model.get_mT(model.solorder) 
+        """
+        # update the block model data for the new block
+        block_model.data_df = self.data_df[self.get_block_ind(k)]
+        block_model.max_age = np.min(self._block_size * k, self._timeseries_length)
+
+        # Ask the block model to generate input scenarios, Sample R
+        block_model.input_model(input_model_params)
+
+        # update the block model initial conditions using 
+        block_model.sT_init = block_model.get_sT(timestep=-1)
+
+        # Shuffle the initial conditions according to the ancestor resampling
+        mT_prev = block_model.get_mT(timestep=-1)
+        for sol in self._sas_solnames:
+            for n in range(self._num_solute_ensemble):
+                block_model.mT_init[:,self._n_solorder[sol][n]] = mT_prev[:,ancestors[self._n_solorder[sol][n]]]
+        # Compute X
+        block_model.run()
+        block_model.get_residuals() # TODO: this one is not needed I think???
+        # TODO: shouldn here be a self.X to store the state evolution?
+        self.all_CT = block_model.get_CT(timestep=self.get_block_ind(k))
+        
+        return block_model
+    # Compute W_k^n
+    def observation_model(self, block_model,obs_model_params):
+        likelihood = np.ones((self._num_solute_ensemble, self._numsol))
+        for isol, sol in enumerate(self._solorder):
+            if 'observations' in block_model.solute_parameters[sol]:
+                for iflux, flux in enumerate(self._comp2learn_fluxorder):
+                    if flux in block_model.solute_parameters[sol]['observations']:
+                        obs = block_model.solute_parameters[sol]['observations'][flux]
+                    residual = block_model.data_df[f'residual {flux}, {sol}, {obs}']
+                    likelihood[:,isol] = likelihood[:,isol] * ss.norm(0,obs_model_params.sig_v).pdf(residual)
+        return likelihood                                                                                                                                                            
     # --------------------Algo 2---------------------
     def run_sMC(self, input_model_params=None, obs_model_params=None, transit_model_params=None):
         """ 
@@ -237,30 +318,93 @@ class Model(sas_Model):
 
                 +   transition_model_params: specify p_q
             Return:
-                +   self.theta: total length of theta
-                        L x D x number of theta
                 +   best estimated X and Z
         """
         # for each time segment to run MESAS
         #block_models = [self.copy_without_results(self) for i in self._num_sas_ensemble]
 
         block_model = self.copy_without_results()
-        b = 0
-
+        d = 0
+        # TODO: add parallelization in the future
+        W_sol = np.zeros((self._num_sas_ensemble,self._num_solute_ensemble,self._numsol))
         for k in range(1, self._num_blocks+1):
             # input model to generate new samples are included in transition model            
 
             block_model = self.transition_model(block_model, k, ancestors, input_model_params,transit_model_params)
 
             # update weights using the observation model, TODO: I am not sure about this way to call block model
-            self.W_sol[k,b,:,:] = block_model.observation_model(obs_model_params)
+            W_sol[d,:,:] = block_model.observation_model(obs_model_params)
             # normalize
-            self.W_sol[k,b,:,:] = self.W_sol[k,b,:,:]/self.W_sol[k,b,:,:].sum(axis=-2)
+            W_sol[d,:,:] =W_sol[d,:,:]/W_sol[d,:,:].sum(axis=-2)
             # set andcestors for the next round
                         
             for isol, sol in enumerate(self._solorder):
                 # sampling from ancestor based on previous weight
-                self.A[k+1,b,:,isol] = pmf_inv(self.W_sol[k,b,:,isol],self.A[k,b,:,isol], num = self._num_solute_ensemble) 
-            ancestors = self.A[k,b,:,:]
+                self.A[k,d,:,isol] = pmf_inv(W_sol[d,:,isol],self.A[k,d,:,isol], num = self._num_solute_ensemble) 
+            ancestors = self.A[k,d,:,:]
+        return 
+
+    # %%
+    # =========================
+    # Algo: particle filter with Ancestor resampling kernel
+    # =========================    
+
+    def pf_theta(self,k):
+        '''
+            +   X_{k+1}^': self.ref_traj
+            +   X_{k+1}^{1:N-1}: results from block model
+            return the sample index of B
+        '''
+        X_ref = self.ref_traj[self.get_block_ind(k)[-1]]
+        X_tp1 = self.all_CT[self.get_block_ind(k)[-1]]
+        ind = pmf_inv(1./self._num_solute_ensemble*np.ones(self._num_solute_ensemble),X_tp1 - X_ref,num = 1)
+        return ind
+    def transit_model_update(self,ancestors):
+        mT_prev = self.block_model.get_mT(timestep=-1)
+        for sol in self._sas_solnames:
+            for n in range(self._num_solute_ensemble):
+                self.block_model.mT_init[:,self._n_solorder[sol][n]] = mT_prev[:,ancestors[self._n_solorder[sol][n]]]
+        return 
+
+
+
+
+    def run_pGAS(self, input_model_params = None, obs_model_params = None, transit_model_params = None):
+        """
+            All the same to sMC except for resampling part
+        """
+        block_model = self.copy_without_results()
+        d = 0
+        w_tilde = np.zeros((self._num_sas_ensemble,self._num_solute_ensemble,self._sas_numsol))
+        # for each solute o
+        for o in range(self._sas_numsol):
+            # sample an ancestral path based on final weight
+            B = np.zeros(self._num_blocks).astype(int)
+            B[-1] = pmf_inv(self.W[-1,d,:,o], self.get_mT(timestep=-1),num = 1)
+            for k in reversed(range(self._num_blocks-1)):
+                B[k-1] = self.A[k,d,B[k],o]
+            # B is the current lineage for current solute
+            notB = np.arange(0,self.num_particles)!=B[0]
+            # TODO: get reference trajectory using B
+            # do I need this CT variable?
+            self.ref_traj = self.all_CT[:,:,B,:]
+
+            W_sol = np.zeros((self._num_sas_ensemble,self._num_solute_ensemble,self._numsol))
+            for k in range(1, self._num_blocks+1):
+                # input model to generate new samples are included in transition model            
+                block_model = self.transition_model(block_model, k, np.arange(self._num_solute_ensemble), input_model_params,transit_model_params)
+                
+                # update particles              
+                for isol, sol in enumerate(self._solorder):
+                    # sampling from ancestor based on previous weight
+                    self.A[k-1,d,:,isol] = pmf_inv(W_sol[d,:,isol],self.A[k-1,d,:,isol], num = self._num_solute_ensemble) 
+                ancestors = self.A[k-1,d,:,:] # other particle
+                ancestors[B[k-1]] = self.pf_theta(k) # reference particle
+                self.transit_model_update(ancestors)
+
+                # update weights using the observation model, TODO: I am not sure about this way to call block model
+                W_sol[d,:,:] = block_model.observation_model(obs_model_params)
+                # normalize
+                self.W[d,:,:] =W_sol[d,:,:]/W_sol[d,:,:].sum(axis=-2)
 
         return 
