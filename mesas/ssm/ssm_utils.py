@@ -8,14 +8,18 @@ import math
 from typing import List
 from sklearn.linear_model import LinearRegression 
 # %%
-def transition_model(model: Model, sol: str) -> dict:
+def f_theta(model: Model, sol: str) -> dict:
     """
-        input:  MESAS model class
-                sol: name of the solute
-        output: next c_old/current m_T
+        #### State transition ####
+        Inputs:
+            +   model: MESAS model class
+            +   sol: name of the solute
+        Return:
+            +   Estimated C_To at final timestep
     """
-    m_T_s = model.get_mT(sol)
-    return m_T_s[:,-1]
+    m_To = model.get_mT(sol)
+    s_T = model.get_sT()
+    return m_To[:,-1]/s_T[:,-1]
 # %%
 # TODO: how to isolate transition model and observation model????????
 def observation_model(model: Model,sol:str, flux:str) -> dict:
@@ -119,6 +123,23 @@ def cal_CI(x: List[float],P: List[float], alpha: float = 0.05):
         L.append(x[i][X_ind[i_lower]])
         U.append(x[i][X_ind[i_upper]])
     return L, U, MLE
+# %%
+def pmf_rv(pmf, x, x_prime):
+    '''
+        give x ~ pmf
+        x_prime: number to find where it is in the pmf
+    return: index of x that are been sampled according to discrete pdf
+    '''
+    ind = np.argsort(x) # sort x according to its magnitude
+    x_sort = x[ind] # sort x accordingly
+    pmf = pmf[ind] # sort pdf accordingly
+   
+    for i,xx in enumerate(x_sort):
+        if x_prime < xx:
+            break
+    pmf[i] *= 
+    return ind[i]
+
 # %%
 steady_benchmarks = {
 	'Uniform':{
