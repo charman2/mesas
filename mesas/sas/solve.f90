@@ -358,7 +358,7 @@ subroutine solveSAS(J_ts, Q_ts, SAS_args, P_list, weights_ts, sT_init_ts, dt, &
                               end do
                            elseif (component_type(ic) == 1) then
                               !Gamma distribution
-                              do concurrent(c=0:N - 1, sT_temp(c) > 0)
+                              do concurrent(c=0:N - 1, sT_temp(c) > 0)local (jt_c, loc_, scale_, a_arg, X, PQcum_component) shared (jt, SAS_args, STcum_in, PQcum_bot, PQcum_top, weights_ts)
                                  jt_c = jt(c)
                                  loc_ = SAS_args(jt_c, args_index_list(ic) + 0)
                                  scale_ = SAS_args(jt_c, args_index_list(ic) + 1)
@@ -396,7 +396,7 @@ subroutine solveSAS(J_ts, Q_ts, SAS_args, P_list, weights_ts, sT_init_ts, dt, &
                               end do
                            elseif (component_type(ic) == 3) then
                               !kumaraswamy distribution
-                              do concurrent(c=0:N - 1, sT_temp(c) > 0)
+                              do concurrent(c=0:N - 1, sT_temp(c) > 0)local (jt_c, loc_, scale_, a_arg, b_arg, X, PQcum_component) shared (jt, SAS_args, STcum_in, PQcum_bot, PQcum_top, weights_ts)
                                  jt_c = jt(c)
                                  loc_ = SAS_args(jt_c, args_index_list(ic) + 0)
                                  scale_ = SAS_args(jt_c, args_index_list(ic) + 1)

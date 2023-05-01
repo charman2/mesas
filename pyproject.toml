@@ -35,9 +35,10 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
   "pandas",
-  "numpy>1.22",
+  "numpy==1.23.5",
   "scipy",
-  "matplotlib"
+  "matplotlib",
+  "pytest"
 ]
 
 [project.urls]

@@ -23,7 +23,8 @@ setup(
             include_dirs=[str(CDFLIB_MODULE_DIR)],
             library_dirs=[str(CDFLIB_MODULE_DIR), str(CDFLIB_BUILD_DIR)],
             libraries=CDFLIB_MODULES,
-            extra_f90_compile_args=["-Ofast", "-fPIC", "-fno-stack-arrays"],
+            extra_f90_compile_args=["-O3", "-parallel","-qopt-report-phase=par","-qopt-report:5"],#, "-fPIC", "-fno-stack-arrays"],
+            extra_compile_args=['-std=c18']
         )
     ]
 )
