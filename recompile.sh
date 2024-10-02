@@ -1,2 +1,2 @@
 rm -r build
-pip install . -v
+pip install -e . -v

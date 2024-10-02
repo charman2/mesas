@@ -554,8 +554,7 @@ def analytical_set(df, S_init=1000.0, C_old=50.0, dt=1):
 
 
 def test_unsteady_uniform(makefigure=False, tmax=500):
-    # %%
-    data_df = pd.read_csv("unsteady_data.csv")
+    data_df = pd.read_csv('./test/unsteady_data.csv')
     data_df = data_df[:tmax]
     data_df["Q"] = data_df["Q"] + data_df["ET"]
     data_df["ET"] = 0
