@@ -13,7 +13,7 @@ import pandas as pd
 import json
 
 import numpy as np
-from mesas_solve import solvesas as solve
+from mesas_solve import solve
 
 dtype = np.float64
 
