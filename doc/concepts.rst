@@ -54,11 +54,11 @@ ages of water are equally likely to be discharged — this is the
 :math:`S_T`, young water is preferentially discharged. When it rises
 steeply near :math:`S(t)`, old water is preferred.
 
-The age-ranked flux of water leaving through outflow :math:`Q` is:
+The backward transit time distribution for outflow :math:`Q` is:
 
 .. math::
 
-    p_Q(T, t) = \frac{\partial \Omega_Q}{\partial S_T} \cdot s_T(T, t) \cdot Q(t)
+    p_Q(T, t) = \frac{\partial \Omega_Q}{\partial S_T} \cdot s_T(T, t)
 
 Types of SAS functions
 ======================
@@ -122,5 +122,6 @@ Further reading
 ===============
 
 - `Harman (2015) <https://doi.org/10.1002/2014WR015707>`_ — Original SAS theory paper
+- `Harman and Xu Fei (2024) <https://gmd.copernicus.org/articles/17/477/2024/>`_ — Unified framework for age and transit time distributions
 - `Benettin et al. (2022) <https://doi.org/10.5194/gmd-15-3881-2022>`_ — MESAS model description paper (GMD)
 - `HydroLearn course <https://edx.hydrolearn.org/courses/course-v1:JHU+570.412+Sp2020>`_ — Free online course on SAS theory
