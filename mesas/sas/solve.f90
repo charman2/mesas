@@ -1,4 +1,17 @@
 ! -*- f90 -*-
+! =============================================================================
+! solveSAS: Main solver for StorAge Selection (SAS) transport theory.
+!
+! This subroutine solves the SAS equations using a method of characteristics
+! combined with Runge-Kutta time integration. It tracks the age-ranked storage
+! of water (sT) and solute mass (mT) over time, computing transit time
+! distributions (pQ) and solute concentrations (C_Q) for each output flux.
+!
+! The approach advances along "characteristics" -- lines of constant entry time
+! in the age-time plane. At each age step, it evaluates SAS functions to
+! determine how much of each flux draws from water of that age, then updates
+! storage and mass accordingly.
+! =============================================================================
 subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, sT_init_fullstep, dt, &
                     verbose, debug, warning, jacobian, &
                     mT_init_fullstep, C_J_fullstep, alpha_fullstep, k1_fullstep, C_eq_fullstep, C_old, &
@@ -12,11 +25,31 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
    !use cdf_normal_mod
    implicit none
 
-   ! Start by declaring and initializing all the variables we will be using
+   ! ---- Scalar control parameters ----
+   ! n_substeps: number of sub-timesteps per full timestep (for numerical accuracy)
+   ! numflux: number of output fluxes (e.g. streamflow, ET)
+   ! numsol: number of solute species being tracked
+   ! max_age: maximum water age (number of full timesteps to track)
+   ! num_scheme: selects the Runge-Kutta order (1=Euler, 2=RK2, 4=RK4)
+   ! timeseries_length: number of full timesteps in the input timeseries
+   ! dt: duration of one full timestep
    integer, intent(in) :: n_substeps, numflux, numsol, max_age, num_scheme, &
                           timeseries_length, numcomponent_total, numargs_total, num_output_fullsteps
    real(8), intent(in) :: dt
    logical, intent(in) :: verbose, debug, warning, jacobian
+   ! ---- Input timeseries data ----
+   ! J_fullstep: influx rate (e.g. precipitation/recharge) at each timestep
+   ! Q_fullstep: outflux rates for each flux at each timestep
+   ! SAS_args: parameters defining SAS function shape (breakpoints or distribution params)
+   ! P_list: cumulative probability values at SAS breakpoints (for piecewise SAS)
+   ! weights_fullstep: mixture weights for multi-component SAS functions
+   ! C_J_fullstep: solute concentration of the influx at each timestep
+   ! alpha_fullstep: solute partitioning coefficient for each flux and solute
+   ! k1_fullstep: first-order reaction rate constant for each solute
+   ! C_eq_fullstep: equilibrium concentration for first-order reactions
+   ! C_old: concentration of water older than max_age (boundary condition)
+   ! sT_init_fullstep: initial age-ranked storage profile
+   ! mT_init_fullstep: initial age-ranked solute mass profile
    real(8), intent(in), dimension(0:timeseries_length - 1) :: J_fullstep
    real(8), intent(in), dimension(0:timeseries_length - 1, 0:numflux - 1) :: Q_fullstep
    real(8), intent(in), dimension(0:timeseries_length - 1, 0:numcomponent_total - 1) :: weights_fullstep
@@ -29,10 +62,25 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
    real(8), intent(in), dimension(0:numsol - 1) :: C_old
    real(8), intent(in), dimension(0:max_age - 1) :: sT_init_fullstep
    real(8), intent(in), dimension(0:max_age - 1, 0:numsol - 1) :: mT_init_fullstep
+   ! ---- SAS function structure indices ----
+   ! output_these_fullsteps: which timesteps to save detailed output for
+   ! component_type: type of each SAS component (-1=piecewise, 1=gamma, 2=beta, 3=kumaraswamy)
+   ! numcomponent_list: number of mixture components per flux
+   ! numargs_list: number of parameters per SAS component
    integer, intent(in), dimension(0:num_output_fullsteps - 1) :: output_these_fullsteps
    integer, intent(in), dimension(0:numcomponent_total - 1) :: component_type
    integer, intent(in), dimension(0:numflux - 1) :: numcomponent_list
    integer, intent(in), dimension(0:numcomponent_total - 1) :: numargs_list
+   ! ---- Output arrays ----
+   ! C_Q_fullstep: flux-weighted solute concentration in each output flux
+   ! dC_fullstep: sensitivity of C_Q to SAS parameters (for Jacobian)
+   ! sT_outputstep: age-ranked storage at selected output timesteps
+   ! mT_outputstep: age-ranked solute mass at selected output timesteps
+   ! pQ_outputstep: transit time distribution (age-ranked fraction of each flux)
+   ! mQ_outputstep: age-ranked solute mass flux for each output flux
+   ! mR_outputstep: age-ranked reaction mass rate
+   ! WaterBalance_outputstep: water balance residual (should be ~0 if correct)
+   ! SoluteBalance_outputstep: solute balance residual (should be ~0 if correct)
    real(8), intent(out), dimension(0:timeseries_length - 1, 0:numflux - 1, 0:numsol - 1) :: C_Q_fullstep
    real(8), intent(out), dimension(0:timeseries_length - 1, 0:numargs_total - 1, 0:numflux - 1, 0:numsol - 1) :: dC_fullstep
    real(8), intent(out), dimension(0:num_output_fullsteps, 0:max_age - 1) :: sT_outputstep
@@ -44,6 +92,22 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
    real(8), intent(out), dimension(0:num_output_fullsteps - 1, 0:numsol - 1, 0:max_age - 1) :: mR_outputstep
    real(8), intent(out), dimension(0:num_output_fullsteps - 1, 0:max_age - 1) :: WaterBalance_outputstep
    real(8), intent(out), dimension(0:num_output_fullsteps - 1, 0:numsol - 1, 0:max_age - 1) :: SoluteBalance_outputstep
+   ! ---- Local working arrays ----
+   ! P_old_fullstep: fraction of each flux that comes from water older than max_age
+   ! args_index_list: maps each SAS component to its starting index in the flat SAS_args array
+   ! component_index_list: maps each flux to its starting index in the component list
+   ! STcum_topbot_start: cumulative storage at the top and bottom of each age bin
+   !   (used to evaluate SAS functions via the cumulative storage coordinate)
+   ! leftbreakpt_topbot: index of the left breakpoint for piecewise SAS lookup
+   ! pQ_temp/pQ_aver: instantaneous and RK-averaged transit time distribution
+   ! mQ_temp/mQ_aver: instantaneous and RK-averaged solute mass flux
+   ! mR_temp/mR_aver: instantaneous and RK-averaged reaction mass rate
+   ! sT_start/sT_temp: age-ranked storage at start of substep / working copy
+   ! mT_start/mT_temp: age-ranked solute mass at start of substep / working copy
+   ! STcum_in: cumulative storage used as input coordinate for SAS evaluation
+   ! jt_fullstep_at_: maps each characteristic index to its current full timestep
+   ! jt_substep_at_: maps each characteristic index to its current substep index
+   ! grad_precalc: pre-computed slopes for each segment of piecewise-linear SAS functions
    !real(8), dimension(0:timeseries_length - 1, 0:numargs_total - 1, 0:numflux - 1) :: dW_outputstep
    real(8), dimension(0:timeseries_length - 1, 0:numflux - 1) :: P_old_fullstep
    integer, dimension(0:numcomponent_total) :: args_index_list
@@ -94,7 +158,11 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
    integer :: i
    real(8) :: start, finish
 
-   ! Useful constants
+   ! ---- Constants and derived quantities ----
+   ! rk4/rk2 coefficients: Butcher tableau weights for Runge-Kutta integration
+   ! norm: normalization factor for averaging across substeps (1/n_substeps^2)
+   ! total_num_substeps: total number of characteristics being tracked
+   ! dt_substep: duration of one substep
    one8 = 1.0
    rk4_stepfraction = (/0.0D0, 0.5D0, 0.5D0, 1.0D0, 1.0D0/)
    rk4_coeff = (/1./6, 2./6, 2./6, 1./6/)
@@ -113,26 +181,34 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
    mT_outputstep(0, :, :) = mT_init_fullstep
 
    call f_verbose('...Starting main loop...')
-   ! Loop over ages
+   ! =========================================================================
+   ! MAIN LOOP: iterate over water age (outer) and substeps (inner).
+   ! At each age step, all characteristics advance one substep in age.
+   ! A "characteristic" tracks a parcel of water from its entry time forward.
+   ! The outer loop increments age; the inner loop divides each full age step
+   ! into n_substeps for numerical accuracy.
+   ! =========================================================================
    do iT_fullstep = 0, max_age - 1
 
-      ! Start the substep loop
       do substep = 0, n_substeps - 1
 
          iT_substep = iT_fullstep*n_substeps + substep
 
-         ! jt_fullstep_at_(c) maps characteristic index c to the full timestep it is currently intersecting
+         ! Map each characteristic c to the full timestep and substep it currently
+         ! intersects. This mapping shifts as age advances.
          do c = 0, total_num_substeps - 1
             jt_substep_at_(c) = mod(c + iT_substep, total_num_substeps)
             jt_is_which_substep = mod(jt_substep_at_(c), n_substeps)
             jt_fullstep_at_(c) = (jt_substep_at_(c) - jt_is_which_substep)/n_substeps
          end do
 
+         ! Reset the RK-averaged fluxes for this substep
          pQ_aver = 0
          mQ_aver = 0
          mR_aver = 0
 
-         ! Apply the initial conditions
+         ! Apply the initial conditions for the newest characteristic entering
+         ! at this substep (inherits from the previous age step's storage/mass)
          if (iT_substep > 0) then
             sT_start(total_num_substeps - iT_substep) = sT_init_fullstep(iT_prev_fullstep)
             mT_start(total_num_substeps - iT_substep, :) = mT_init_fullstep(iT_prev_fullstep, :)
@@ -157,6 +233,11 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
          !dm_temp = dm_start
          !end if
 
+         ! ---- Runge-Kutta time integration ----
+         ! Advance sT and mT by one substep using the selected RK scheme.
+         ! get_flux: evaluates SAS functions to compute pQ, mQ, mR at current state
+         ! add_to_average: accumulates weighted RK stage contributions
+         ! new_state: updates sT, mT using the flux estimates
          select case (num_scheme)
          case (1)
             ! This is the forward Euler
@@ -197,7 +278,7 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
             call new_state(sT_temp, mT_temp, pQ_aver, mQ_aver, mR_aver, rk4_stepfraction(rk))
          end select
 
-         ! Update the state with the new estimates
+         ! Commit the RK result: update the starting state for the next substep
          sT_start = sT_temp
          mT_start = mT_temp
          !if (jacobian) then
@@ -227,7 +308,9 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
 
    call f_verbose('...Finalizing...')
 
-   ! Add in the old water concentration
+   ! ---- Finalization: add contribution from water older than max_age ----
+   ! Water older than max_age is assumed to have concentration C_old.
+   ! P_old_fullstep tracks the fraction of each flux not yet accounted for.
    do concurrent(s=0:numsol - 1, iq=0:numflux - 1)
       where (Q_fullstep(:, iq) > 0)
          C_Q_fullstep(:, iq, s) = C_Q_fullstep(:, iq, s) + alpha_fullstep(:, iq, s)*C_old(s)*P_old_fullstep(:, iq)
@@ -248,6 +331,7 @@ subroutine solveSAS(J_fullstep, Q_fullstep, SAS_args, P_list, weights_fullstep, 
 
 contains
 
+   ! ---- Initialize all working and output arrays to zero ----
    subroutine initialize_arrays()
       call f_verbose('...Initializing arrays...')
       C_Q_fullstep = 0.
@@ -294,6 +378,11 @@ contains
       iT_prev_fullstep = -1
    end subroutine initialize_arrays
 
+   ! ---- Pre-compute index mappings and piecewise-linear gradients ----
+   ! Builds args_index_list and component_index_list so that SAS parameters
+   ! for each flux component can be quickly looked up from the flat arrays.
+   ! Also pre-computes the slope (gradient) of each linear segment in
+   ! piecewise-linear SAS functions to avoid repeated calculation.
    subroutine precalculate_useful_things()
       ! The list of probabilities in each sas function is a 1-D array.
       ! args_index_list gives the starting index of the probabilities (P) associated
@@ -323,6 +412,10 @@ contains
 
    end subroutine precalculate_useful_things
 
+   ! ---- Update cumulative storage along characteristics ----
+   ! STcum_topbot_start tracks the cumulative storage at the top (younger)
+   ! and bottom (older) edges of each age bin. These values serve as the
+   ! input coordinate for SAS function evaluation at the next substep.
    subroutine update_ST()
 
       ! Record the new values of ST
@@ -339,6 +432,13 @@ contains
 
    end subroutine update_ST
 
+   ! ---- Accumulate results into output arrays ----
+   ! This subroutine does four things at each substep:
+   ! 1) Accumulates flux-weighted concentration C_Q for each output flux
+   ! 2) Updates P_old (fraction of flux from water older than current age)
+   ! 3) Accumulates transit time distributions (pQ) and mass fluxes (mQ, mR)
+   !    into the output arrays, accounting for substep alignment
+   ! 4) Extracts age-ranked storage and mass at selected output timesteps
    subroutine update_records()
       ! update output conc
       do concurrent(jt_fullstep=0:timeseries_length - 1, jt_is_which_substep=0:n_substeps - 1, &
@@ -431,6 +531,12 @@ contains
 
    end subroutine update_records
 
+   ! ---- Compute water and solute mass balance residuals ----
+   ! For each age bin and output timestep, the water balance checks:
+   !   inflow (J or sT from previous age) - outflow (sum of Q*pQ) - change in storage = 0
+   ! The solute balance checks:
+   !   mass in (C_J*J or mT from previous age) - mass out (sum of mQ) - reaction (mR) - change in mass = 0
+   ! Non-zero residuals indicate numerical error.
    subroutine calculate_balances()
 
       ! Calculate a water balance
@@ -476,6 +582,14 @@ contains
       end do
    end subroutine calculate_balances
 
+   ! ---- Compute fluxes from current state using SAS functions ----
+   ! Given the current age-ranked storage (sT) and mass (mT), this subroutine:
+   ! 1) Calls calculate_pQ to evaluate SAS functions and get the transit time
+   !    distribution pQ (fraction of each flux drawn from each age)
+   ! 2) Computes solute mass flux mQ = mT * alpha * Q * pQ / sT
+   !    (well-mixed within each age bin, scaled by partitioning coefficient alpha)
+   ! 3) Computes reaction mass rate mR = k1 * (C_eq * sT - mT) for first-order reactions
+   ! The stepfraction parameter controls time interpolation for RK stages.
    subroutine get_flux(sT, mT, pQ, mQ, mR, stepfraction)
       real(8), intent(in), dimension(0:timeseries_length*n_substeps - 1) :: sT
       real(8), intent(in), dimension(0:timeseries_length*n_substeps - 1, 0:numsol - 1) :: mT
@@ -642,6 +756,8 @@ contains
       call f_debug('pQ_temp end            ', pQ_temp(:, 0))
    end subroutine get_flux
 
+   ! ---- Accumulate RK-weighted flux estimates into running average ----
+   ! Each RK stage contributes to the final average with its Butcher weight.
    subroutine add_to_average(pQ, mQ, mR, coeff)
       real(8), intent(in), dimension(0:timeseries_length*n_substeps - 1, 0:numflux - 1) :: pQ
       real(8), intent(in), dimension(0:timeseries_length*n_substeps - 1, 0:numflux - 1, 0:numsol - 1) :: mQ
@@ -660,6 +776,12 @@ contains
       !end if
    end subroutine add_to_average
 
+   ! ---- Advance state by one RK sub-stage ----
+   ! Updates age-ranked storage and mass using flux estimates:
+   !   sT_new = sT_start + J*stepfraction - sum(Q*pQ)*dt_numerical
+   !   mT_new = mT_start + C_J*J*stepfraction - sum(mQ)*dt_numerical + mR*dt_numerical
+   ! At iT_substep==0, the influx J enters (water enters storage at age 0).
+   ! Negative sT values are clipped to zero.
    subroutine new_state(sT, mT, pQ, mQ, mR, stepfraction)
       real(8), intent(inout), dimension(0:timeseries_length*n_substeps - 1) :: sT
       real(8), intent(inout), dimension(0:timeseries_length*n_substeps - 1, 0:numsol - 1) :: mT
@@ -709,6 +831,14 @@ contains
 
    end subroutine new_state
 
+   ! ---- Evaluate SAS functions to compute pQ (transit time distribution) ----
+   ! The SAS function Omega_Q(S_T) maps cumulative storage S_T to cumulative
+   ! discharge fraction. pQ is obtained by differencing:
+   !   pQ = [Omega(STcum_bottom) - Omega(STcum_top)] / dt_substep
+   ! where STcum_top and STcum_bottom are the cumulative storage at the top
+   ! and bottom of the current age bin, interpolated to the RK stage time.
+   ! For multi-component SAS functions, contributions are weighted and summed.
+   ! Supports piecewise-linear, gamma, beta, and Kumaraswamy SAS function types.
    subroutine calculate_pQ(sT, pQ, stepfraction)
       implicit none
       real(8), intent(inout), dimension(0:timeseries_length*n_substeps - 1, 0:numflux - 1) :: pQ
@@ -807,6 +937,10 @@ contains
 
    end subroutine calculate_pQ
 
+   ! ---- Evaluate a piecewise-linear SAS function at cumulative storage ST ----
+   ! Performs a linear search through breakpoints to find the segment containing ST,
+   ! then interpolates using the pre-computed gradient. Returns the cumulative
+   ! probability P at the given storage value. Clamps to boundary values outside range.
    real(8) PURE FUNCTION piecewiselinear_SAS_function(ST, ST_breakpt, P_breakpt, grad, na_)
       real(8), INTENT(IN) :: ST
       integer, INTENT(IN) :: na_
@@ -836,6 +970,9 @@ contains
       end if
    end FUNCTION piecewiselinear_SAS_function
 
+   ! ---- Evaluate a Kumaraswamy CDF as SAS function ----
+   ! CDF: F(x) = 1 - (1 - x^a)^b, where x = (ST - loc) / scale, clamped to [0,1].
+   ! params = (loc, scale, a, b)
    real(8) PURE FUNCTION kumaraswamy_SAS_function(ST, params)
       real(8), INTENT(IN) :: ST
       real(8), INTENT(IN), dimension(4) :: params
@@ -849,6 +986,9 @@ contains
       kumaraswamy_SAS_function = 1 - (1 - X**a_arg)**b_arg
    end function kumaraswamy_SAS_function
 
+   ! ---- Evaluate a Beta CDF as SAS function ----
+   ! Uses the incomplete beta function (betain) with location-scale transform.
+   ! params = (loc, scale, a, b)
    real(8) PURE FUNCTION beta_SAS_function(ST, params)
       real(8), INTENT(IN) :: ST
       real(8), INTENT(IN), dimension(4) :: params
@@ -863,6 +1003,9 @@ contains
       beta_SAS_function = betain( X, a_arg, b_arg)
    end function beta_SAS_function
 
+   ! ---- Evaluate a Gamma CDF as SAS function ----
+   ! Uses the incomplete gamma integral (gammad) with location-scale transform.
+   ! params = (loc, scale, a). Returns 0 for ST <= loc.
    real(8) PURE FUNCTION gamma_SAS_function(ST, params)
       real(8), INTENT(IN) :: ST
       real(8), INTENT(IN), dimension(3) :: params

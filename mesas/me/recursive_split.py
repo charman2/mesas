@@ -1,3 +1,17 @@
+"""Recursive splitting algorithm for SAS function estimation.
+
+Estimates piecewise-constant SAS functions by iteratively splitting
+segments and optimising against observed solute concentrations using
+cross-validated least-squares.
+
+.. note::
+   This module references ``model.sas_blends`` in several places, which
+   was renamed to ``sas_specs`` in the current codebase.  These references
+   need updating before the module can be used at runtime.
+"""
+
+from __future__ import annotations
+
 import inspect
 
 import numpy as np

@@ -1,16 +1,24 @@
+"""StorAge Selection (SAS) transport model.
+
+This module implements the :class:`Model` class, the main entry point for
+building and running SAS models.  A Model wraps:
+
+- a timeseries DataFrame of influx / outflux data,
+- SAS function specifications (one per outflux), and
+- optional solute transport parameters.
+
+Call :meth:`Model.run` to invoke the Fortran solver; results are then
+available through accessor methods (``get_sT``, ``get_pQ``, etc.).
 """
 
-Module Models
-=============
-
-Text here
-"""
+from __future__ import annotations
 
 import copy
 import json
 import os
 from collections import OrderedDict
 from copy import deepcopy
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,7 +30,19 @@ from .solve import solvesas as solve
 dtype = np.float64
 
 
-def _processinputs(input):
+def _processinputs(input: dict | str) -> dict:
+    """Load model input from a dict or a JSON file path.
+
+    Parameters
+    ----------
+    input : dict or str
+        Either a dict (returned as-is) or a path to a ``.json`` file.
+
+    Returns
+    -------
+    dict
+        The parsed input dictionary.
+    """
     if isinstance(input, dict):
         return input
     elif isinstance(input, str):
@@ -37,15 +57,38 @@ def _processinputs(input):
 
 
 class Model:
-    """
-    Class for building and running StorAge Selection models
+    """StorAge Selection (SAS) transport model.
 
-    An instance of this class must be constructed, populated with
-    parameters (held in the dicts :ref:`sas_specs <sasspec>` and optionally :ref:`solute_parameters <solspec>`),
-    associated with a dataset (`data_df`) and run using the `.run()` method.
+    Construct with timeseries data, SAS function specifications, and
+    (optionally) solute parameters, then call :meth:`run` to execute the
+    Fortran solver.
+
+    Parameters
+    ----------
+    data_df : pd.DataFrame or str
+        Timeseries data, or a path to a CSV file.  Must contain at least
+        the influx column (default ``"J"``) and one outflux column per
+        entry in *sas_specs*.
+    config : dict or str, optional
+        Configuration dict or path to a JSON config file.  May contain
+        ``"options"``, ``"sas_specs"``, and ``"solute_parameters"`` keys.
+    sas_specs : dict or str, optional
+        SAS specification dict (one key per outflux) or JSON path.
+    solute_parameters : dict or str, optional
+        Solute transport parameters or JSON path.
+    **kwargs
+        Any model option (``dt``, ``verbose``, ``num_scheme``, etc.)
+        passed as keyword arguments overrides config-file values.
     """
 
-    def __init__(self, data_df, config=None, sas_specs=None, solute_parameters=None, **kwargs):
+    def __init__(
+        self,
+        data_df: pd.DataFrame | str,
+        config: dict | str | None = None,
+        sas_specs: dict | str | None = None,
+        solute_parameters: dict | str | None = None,
+        **kwargs: Any,
+    ) -> None:
         # defaults
         self._result = None
         self.jacobian = {}
@@ -104,13 +147,14 @@ class Model:
 
     def __repr__(self):
         """Creates a repr for the model"""
-        repr = ""
+        result = ""
         for flux, sas_spec in self.sas_specs.items():
-            repr += f"flux = {flux}\n"
-            repr += sas_spec.__repr__()
-        return repr
+            result += f"flux = {flux}\n"
+            result += sas_spec.__repr__()
+        return result
 
-    def parse_sas_specs(self, sas_specs):
+    def parse_sas_specs(self, sas_specs: dict) -> dict[str, SAS_Spec]:
+        """Validate and convert raw SAS spec dicts into :class:`SAS_Spec` objects."""
         for flux, spec_in in sas_specs.items():
             spec = deepcopy(spec_in)
             assert flux in self.data_df.columns
@@ -122,8 +166,8 @@ class Model:
                 sas_specs[flux] = SAS_Spec(spec, self.data_df)
         return sas_specs
 
-    def copy_without_results(self):
-        # returns a new instance of the model, but clears any results
+    def copy_without_results(self) -> Model:
+        """Return a deep copy of this model with results cleared."""
         return Model(
             copy.deepcopy(self._data_df),
             copy.deepcopy(self._sas_specs),
@@ -233,20 +277,24 @@ class Model:
         self._numflux = len(self._sas_specs)
         self._fluxorder = list(self._sas_specs.keys())
 
-    def set_sas_spec(self, flux, sas_spec):
+    def set_sas_spec(self, flux: str, sas_spec: SAS_Spec) -> None:
+        """Replace the SAS specification for a given flux."""
         self._sas_specs[flux] = sas_spec
         self._sas_specs[flux].make_spec_ts(self.data_df)
 
-    def set_component(self, flux, component):
+    def set_component(self, flux: str, component: Any) -> None:
+        """Replace a single component within a flux's SAS specification."""
         label = component.label
         self._sas_specs[flux].components[label] = component
         self._sas_specs[flux].make_spec_ts()
 
-    def set_sas_fun(self, flux, label, sas_fun):
+    def set_sas_fun(self, flux: str, label: str, sas_fun: Any) -> None:
+        """Replace the SAS function of a named component."""
         self._sas_specs[flux].components[label].sas_fun = sas_fun
         self._sas_specs[flux].make_spec_ts()
 
-    def get_component_labels(self):
+    def get_component_labels(self) -> dict[str, list[str]]:
+        """Return ``{flux: [label, ...]}`` for all SAS components."""
         component_labels = {}
         for flux in self._fluxorder:
             component_labels[flux] = list(self._sas_specs[flux].components.keys())
@@ -324,7 +372,7 @@ class Model:
             self._solute_parameters = {}
             self._solorder = []
 
-    def set_solute_parameters(self, sol, params):
+    def set_solute_parameters(self, sol: str, params: dict) -> None:
         invalid_parameters = [paramkey for paramkey in params.keys() if paramkey not in self._default_parameters.keys()]
         if any(invalid_parameters):
             raise KeyError("invalid parameters for {}: {}".format(sol, invalid_parameters))
@@ -359,10 +407,21 @@ class Model:
         return C_J, mT_init, C_old, alpha, k1, C_eq
 
     def _create_sas_lookup(self):
-        nC_list = []
-        nargs_list = []
-        component_list = []
-        component_type = []
+        """Build flattened SAS lookup tables for the Fortran solver.
+
+        The Fortran solver expects all SAS function parameters packed into
+        flat arrays.  This method iterates over fluxes and their components
+        to produce:
+
+        - ``SAS_args``: breakpoint ST values, shape ``(nC_total, max_nargs)``
+        - ``P_list``: breakpoint P values, same shape
+        - ``weights``: component blending weights, shape ``(timeseries_length, nC_total)``
+        - ``component_type``: int type code per component (0=piecewise, 1+=continuous)
+        - ``nC_list``: number of components per flux
+        - ``nargs_list``: number of breakpoints per component
+        """
+        nC_list = []  # number of components for each flux
+        component_list = []  # flat list of all Component objects across all fluxes
         for flux in self._fluxorder:
             nC_list.append(len(self._sas_specs[flux].components))
             for component in self._sas_specs[flux]._componentorder:
@@ -371,36 +430,43 @@ class Model:
         component_type = [component.type for component in component_list]
         nC_total = np.sum(nC_list)
         nargs_total = np.sum(nargs_list)
+        # Pack breakpoint arrays: each row is one component's ST or P values
         SAS_args = np.column_stack([[component.argsS] for component in component_list]).T
         P_list = np.column_stack([[component.argsP] for component in component_list]).T
+        # Blending weights: shape (timeseries_length, nC_total)
         weights = np.column_stack([component.weights for component in component_list])
         return SAS_args, P_list, weights, component_type, nC_list, nC_total, nargs_list, nargs_total
 
-    def run(self):
+    def run(self) -> None:
+        """Execute the SAS model with current parameters.
+
+        Calls the Fortran solver (``solvesas``) and stores results in
+        ``self._result``.  Predicted outflux concentrations are also
+        written back into ``self.data_df`` as columns named
+        ``"<solute> --> <flux>"``.
+
+        Results are accessible via :attr:`result` and the ``get_*`` methods.
         """
-        Call this method to run the model with current SAS specification, options, solute parameters, and timeseries dataframe. Results can then be accessed through the `.result` property of the model object
-        :return: None
-        """
-        # water fluxes
-        J = self.data_df[self.options["influx"]].values
-        Q = self.data_df[self._fluxorder].values
+        # --- 1. Extract water flux timeseries ---
+        J = self.data_df[self.options["influx"]].values  # influx [T]
+        Q = self.data_df[self._fluxorder].values  # outfluxes [T, numflux]
         sT_init = self.options["sT_init"]
         timeseries_length = self._timeseries_length
         numflux = self._numflux
-        #
-        # SAS lookup table
+
+        # --- 2. Build SAS lookup tables (flattened for Fortran) ---
         SAS_args, P_list, weights, component_type, nC_list, nC_total, nargs_list, nargs_total = (
             self._create_sas_lookup()
         )
         SAS_args = np.asfortranarray(SAS_args)
         P_list = np.asfortranarray(P_list)
         weights = np.asfortranarray(weights)
-        #
-        # Solutes
+
+        # --- 3. Build solute input arrays ---
         C_J, mT_init, C_old, alpha, k1, C_eq = self._create_solute_inputs()
         numsol = max(self._numsol, 1)
-        #
-        # options
+
+        # --- 4. Unpack scalar options ---
         dt = self.options["dt"]
         verbose = self.options["verbose"]
         debug = self.options["debug"]
@@ -410,37 +476,40 @@ class Model:
         max_age = self.options["max_age"]
         num_scheme = self.options["num_scheme"]
 
+        # Which timesteps to record (depends on record_state option)
         index_ts = self._index_ts
 
-        # Enforce max_age
+        # Truncate initial conditions to max_age
         sT_init = sT_init[:max_age]
         mT_init = mT_init[:max_age, :]
 
-        # call the Fortran code
+        # --- 5. Call the Fortran solver ---
+        # The solver expects ~30 positional arguments in a specific order.
+        # SAS_args/P_list are transposed because Fortran uses column-major order.
         fresult = solve(
-            J,
-            Q,
-            np.asfortranarray(SAS_args.T),
-            np.asfortranarray(P_list.T),
-            np.asfortranarray(weights),
-            sT_init,
-            dt,
+            J,  # influx timeseries
+            Q,  # outflux timeseries [T, numflux]
+            np.asfortranarray(SAS_args.T),  # SAS breakpoint ST values
+            np.asfortranarray(P_list.T),  # SAS breakpoint P values
+            np.asfortranarray(weights),  # component blending weights
+            sT_init,  # initial age-ranked storage
+            dt,  # timestep size
             verbose,
             debug,
             warning,
-            jacobian,
-            mT_init,
-            np.asfortranarray(C_J),
-            np.asfortranarray(alpha),
-            np.asfortranarray(k1),
-            np.asfortranarray(C_eq),
-            C_old,
-            n_substeps,
-            component_type,
-            nC_list,
-            nargs_list,
-            index_ts,
-            num_scheme,
+            jacobian,  # flags
+            mT_init,  # initial age-ranked solute mass
+            np.asfortranarray(C_J),  # influx concentrations
+            np.asfortranarray(alpha),  # evapoconcentration factors
+            np.asfortranarray(k1),  # first-order reaction rates
+            np.asfortranarray(C_eq),  # equilibrium concentrations
+            C_old,  # concentration of pre-initial water
+            n_substeps,  # sub-timesteps per full step
+            component_type,  # int type code per component
+            nC_list,  # num components per flux
+            nargs_list,  # num breakpoints per component
+            index_ts,  # which timesteps to record
+            num_scheme,  # RK scheme (1=Euler, 2=RK2, 4=RK4)
             numflux,
             numsol,
             max_age,
@@ -451,8 +520,12 @@ class Model:
         )
         sT, pQ, WaterBalance, mT, mQ, mR, C_Q, dsTdSj, dmTdSj, dCdSj, SoluteBalance = fresult
 
+        # --- 6. Store results ---
+        # Fortran arrays use (timestep, ..., age) ordering; moveaxis converts
+        # the last axis (age) to the first so Python arrays are (age, timestep, ...).
         if self._numsol > 0:
             self._result = {"C_Q": C_Q}
+            # Write predicted concentrations back into the DataFrame
             for isol, sol in enumerate(self._solorder):
                 for iflux, flux in enumerate(self._fluxorder):
                     colname = sol + " --> " + flux
@@ -461,18 +534,18 @@ class Model:
             self._result = {}
         self._result.update(
             {
-                "sT": np.moveaxis(sT, -1, 0),
-                "pQ": np.moveaxis(pQ, -1, 0),
-                "WaterBalance": np.moveaxis(WaterBalance, -1, 0),
-                "dsTdSj": np.moveaxis(dsTdSj, -1, 0),
+                "sT": np.moveaxis(sT, -1, 0),  # age-ranked storage density
+                "pQ": np.moveaxis(pQ, -1, 0),  # age-ranked outflux probability
+                "WaterBalance": np.moveaxis(WaterBalance, -1, 0),  # conservation residual
+                "dsTdSj": np.moveaxis(dsTdSj, -1, 0),  # Jacobian of sT w.r.t. SAS params
             }
         )
         if self._numsol > 0:
             self._result.update(
                 {
-                    "mT": np.moveaxis(mT, -1, 0),
-                    "mQ": np.moveaxis(mQ, -1, 0),
-                    "mR": np.moveaxis(mR, -1, 0),
+                    "mT": np.moveaxis(mT, -1, 0),  # age-ranked solute mass density
+                    "mQ": np.moveaxis(mQ, -1, 0),  # age-ranked solute outflux
+                    "mR": np.moveaxis(mR, -1, 0),  # age-ranked reaction mass
                     "SoluteBalance": np.moveaxis(SoluteBalance, -1, 0),
                     "dmTdSj": np.moveaxis(dmTdSj, -1, 0),
                     "dCdSj": dCdSj,
@@ -485,21 +558,23 @@ class Model:
         for isol, sol in enumerate(self._solorder):
             if "observations" in self.solute_parameters[sol]:
                 self.jacobian[sol] = {}
-                iP = 0
+                param_offset = 0
                 for isolflux, solflux in enumerate(self._fluxorder):
                     if solflux in self.solute_parameters[sol]["observations"]:
                         J_seg = None
                         for iflux, flux in enumerate(self._comp2learn_fluxorder):
                             for label in self._components_to_learn[flux]:
-                                nP = len(self.sas_specs[flux].components[label].sas_fun.P)
-                                J_S = np.squeeze(self.result["dCdSj"][:, iP : iP + nP, isolflux, isol])
+                                n_breakpoints = len(self.sas_specs[flux].components[label].sas_fun.P)
+                                J_S = np.squeeze(
+                                    self.result["dCdSj"][:, param_offset : param_offset + n_breakpoints, isolflux, isol]
+                                )
                                 if mode == "endpoint":
                                     pass
                                 elif mode == "segment":
                                     # To get the derivative with respect to the segment length, we add up the derivative w.r.t. the
                                     # endpoints that would be displaced by varying that segment
-                                    A = np.triu(np.ones(nP), k=0)
-                                    J_S = np.dot(A, J_S.T).T
+                                    endpoint_to_segment = np.triu(np.ones(n_breakpoints), k=0)
+                                    J_S = np.dot(endpoint_to_segment, J_S.T).T
                                     if logtransform:
                                         J_S = J_S * self.sas_specs[flux].components[label].sas_fun._parameter_list
                                 if J_seg is None:
@@ -518,11 +593,11 @@ class Model:
                         self.jacobian[sol][flux] = {}
                         self.jacobian[sol][flux]["seg"] = J_seg
                         self.jacobian[sol][flux]["C_old"] = J_old
-                    iP += nP
+                    param_offset += n_breakpoints
         return J
 
     def get_residuals(self):
-        ri = None
+        residuals = None
         for isol, sol in enumerate(self._solorder):
             if "observations" in self.solute_parameters[sol]:
                 for iflux, flux in enumerate(self._comp2learn_fluxorder):
@@ -531,13 +606,13 @@ class Model:
                         C_obs = self.data_df[obs]
                         iflux = list(self._fluxorder).index(flux)
                         isol = list(self._solorder).index(sol)
-                        this_ri = self.result["C_Q"][:, iflux, isol] - C_obs.values
-                        if ri is None:
-                            ri = this_ri
+                        this_residual = self.result["C_Q"][:, iflux, isol] - C_obs.values
+                        if residuals is None:
+                            residuals = this_residual
                         else:
-                            ri = np.concatenate((ri, this_ri), axis=0)
-                        self.data_df[f"residual {flux}, {sol}, {obs}"] = this_ri
-        return ri
+                            residuals = np.concatenate((residuals, this_residual), axis=0)
+                        self.data_df[f"residual {flux}, {sol}, {obs}"] = this_residual
+        return residuals
 
     def get_obs_index(self):
         index = None
@@ -554,7 +629,9 @@ class Model:
                             index = np.concatenate((index, this_index), axis=0)
         return np.nonzero(index)[0]
 
-    def _get_result(self, X, timestep=None, agestep=None, inputtime=None):
+    def _get_result(
+        self, X: np.ndarray, timestep: int | None = None, agestep: int | None = None, inputtime: int | None = None
+    ) -> np.ndarray:
         if timestep is not None:
             # Only one can be given
             assert agestep is None
@@ -572,47 +649,62 @@ class Model:
             return np.diagonal(X, offset=inputtime)
         return X
 
-    def get_WaterBalance(self, **kwargs):
+    def get_WaterBalance(self, **kwargs) -> np.ndarray:
+        """Water conservation residual array, shape ``(max_age, n_output_steps)``.
+
+        Should be near machine precision when ``record_state=True``.
+        """
         X = self.result["WaterBalance"]
         return self._get_result(X, **kwargs)
 
-    def get_sT(self, **kwargs):
+    def get_sT(self, **kwargs) -> np.ndarray:
+        """Age-ranked storage density ``sT``, shape ``(max_age, n_output_steps)``."""
         X = self.result["sT"]
         return self._get_result(X, **kwargs)
 
-    def get_pQ(self, flux, **kwargs):
+    def get_pQ(self, flux: str, **kwargs) -> np.ndarray:
+        """Age-ranked outflux probability ``pQ`` for a given flux."""
         iflux = list(self._fluxorder).index(flux)
         X = self.result["pQ"][:, :, iflux]
         return self._get_result(X, **kwargs)
 
-    def get_mT(self, sol, **kwargs):
+    def get_mT(self, sol: str, **kwargs) -> np.ndarray:
+        """Age-ranked solute mass density ``mT`` for a given solute."""
         isol = list(self._solorder).index(sol)
         X = self.result["mT"][:, :, isol]
         return self._get_result(X, **kwargs)
 
-    def get_CT(self, sol, **kwargs):
+    def get_CT(self, sol: str, **kwargs) -> np.ndarray:
+        """Age-ranked solute concentration ``CT = mT / sT``."""
         isol = list(self._solorder).index(sol)
         sT = self._get_result(self.result["sT"], **kwargs)
         mT = self._get_result(self.result["mT"][:, :, isol], **kwargs)
-        return np.where(sT > 0, mT / sT, np.NaN)
+        return np.where(sT > 0, mT / sT, np.nan)
 
-    def get_mR(self, sol, **kwargs):
+    def get_mR(self, sol: str, **kwargs) -> np.ndarray:
+        """Age-ranked reaction mass ``mR`` for a given solute."""
         isol = list(self._solorder).index(sol)
         X = self.result["mR"][:, :, isol]
         return self._get_result(X, **kwargs)
 
-    def get_SoluteBalance(self, sol, **kwargs):
+    def get_SoluteBalance(self, sol: str, **kwargs) -> np.ndarray:
+        """Solute conservation residual for a given solute.
+
+        Should be near machine precision when ``record_state=True``.
+        """
         isol = list(self._solorder).index(sol)
         X = self.result["SoluteBalance"][:, :, isol]
         return self._get_result(X, **kwargs)
 
-    def get_mQ(self, flux, sol, **kwargs):
+    def get_mQ(self, flux: str, sol: str, **kwargs) -> np.ndarray:
+        """Age-ranked solute outflux ``mQ`` for a given flux and solute."""
         iflux = list(self._fluxorder).index(flux)
         isol = list(self._solorder).index(sol)
         X = self.result["mQ"][:, :, iflux, isol]
         return self._get_result(X, **kwargs)
 
-    def get_ST(self, **kwargs):
+    def get_ST(self, **kwargs) -> np.ndarray:
+        """Cumulative storage ``ST = cumsum(sT) * dt``."""
         sT = self.get_sT()
         ST = np.cumsum(sT, axis=0) * self.options["dt"]
         return self._get_result(ST, **kwargs)

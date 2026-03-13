@@ -5,8 +5,8 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 ## Current State
 
 **Branch:** `stochastic`
-**Working stage:** Stage 0 — COMPLETE
-**Last commit:** `dad89a1` — Stage 0 final (coverage, pre-commit, CI)
+**Working stage:** Stage 1 — COMPLETE
+**Last commit:** Stage 1 documentation, type hints, and variable renames
 
 ## Completed
 
@@ -34,9 +34,23 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 - [x] Added GitHub Actions CI (`.github/workflows/tests.yml`) for Linux/macOS, Python 3.10/3.11
 - [x] All 46 new tests pass (60 total, 2 pre-existing path failures in test_time.py/test_time2.py)
 
+### Stage 1: Code Quality and Documentation
+- [x] Ran ruff linter + formatter across Python codebase (formatting-only commit `42207c3`)
+- [x] Added NumPy-style docstrings to all public classes/methods in `model.py`, `specs.py`, `functions.py`
+- [x] Added module docstrings to `recursive_split.py` and `vis.py` (noting broken `sas_blends` references)
+- [x] Added `from __future__ import annotations` and type hints to all public Python APIs
+- [x] Added inline comments to `model.py:run()` and `model.py:_create_sas_lookup()` explaining Python–Fortran data marshalling
+- [x] Added block-level comments to `solve.f90` explaining major sections (init, RK stepping, flux calc, mass balance)
+- [x] Renamed unclear variables: `repr` → `result` (shadowed builtin), `iP` → `param_offset`, `nP` → `n_breakpoints`, `A` → `endpoint_to_segment`, `ri` → `residuals`, `ex` → `err`
+- [x] Fixed typo: `selfs` → `self` in `Continuous.func` setter
+- [x] Removed dead commented-out code in `__repr__` methods
+- [x] Fixed `np.NaN` → `np.nan`, `== True/False` → `is True/False`, import order issues
+- [x] Created `CONTRIBUTING.md` with dev setup, testing, and code style instructions
+- [x] Updated `mesas/__init__.py` with convenience import (`from mesas import Model`)
+- [x] All 46 Stage 0 tests pass — zero tolerance change
+
 ## Not Yet Started
 
-- Stage 1: Code Quality and Documentation
 - Stage 2: Fix the Build System
 - Stage 3: Replace the Fortran Solver
 - Stage 4: API Cleanup

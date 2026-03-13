@@ -1,3 +1,16 @@
+"""Visualization utilities for SAS transport models.
+
+Provides functions for plotting the "transport column" — a visualization
+of how water of different ages is stored and released, coloured by
+solute concentration.
+
+.. note::
+   ``plot_SAS_cumulative`` references ``model.sas_blends`` which was
+   renamed to ``sas_specs``.  This needs updating before use.
+"""
+
+from __future__ import annotations
+
 from collections import OrderedDict
 
 import matplotlib.colors as colors
