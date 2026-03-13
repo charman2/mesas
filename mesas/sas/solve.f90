@@ -457,11 +457,11 @@ contains
             if (iT_fullstep == 0) then
                do s = 0, numsol - 1
                   SoluteBalance_outputstep(outputstep, s, iT_fullstep) = &
-                     C_J_fullstep(jt_fullstep, s)*J_fullstep(jt_fullstep) - mT_outputstep(outputstep + 1, s, iT_fullstep)*dt
+                     C_J_fullstep(jt_fullstep, s)*J_fullstep(jt_fullstep) - mT_outputstep(outputstep + 1, s, iT_fullstep)
                end do
             else
                SoluteBalance_outputstep(outputstep, :, iT_fullstep) = &
-                  mT_outputstep(outputstep, :, iT_fullstep - 1)*dt - mT_outputstep(outputstep + 1, :, iT_fullstep)*dt
+                  mT_outputstep(outputstep, :, iT_fullstep - 1) - mT_outputstep(outputstep + 1, :, iT_fullstep)
             end if
             ! Subtract timestep-averaged mass fluxes
             do iq = 0, numflux - 1

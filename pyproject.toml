@@ -49,4 +49,4 @@ repository = "https://github.com/charman2/mesas"
 packages = ["mesas", "mesas.sas", "mesas.me", "mesas.utils"]
 
 [tool.pytest.ini_options]
-testpaths = ["mesas/test"]
+testpaths = ["test"]
