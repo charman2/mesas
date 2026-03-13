@@ -4,9 +4,9 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 
 ## Current State
 
-**Branch:** `stochastic` (the active development branch, ahead of `origin/main` by ~100 commits)
-**Working stage:** Stage 0 — Establish a Testing Baseline
-**Last commit:** `2bf9a57` — Added refactoring plan, tracked untracked files, updated .gitignore
+**Branch:** `stochastic`
+**Working stage:** Stage 0 — COMPLETE
+**Last commit:** `dad89a1` — Stage 0 final (coverage, pre-commit, CI)
 
 ## Completed
 
@@ -19,20 +19,20 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 - [x] Updated `.gitignore` to exclude debug/, generated files, IDE configs, .claude/
 - [x] Committed baseline (commit `2bf9a57`)
 
-## In Progress
-
 ### Stage 0: Testing Baseline
-
-Items to complete (in order):
-1. **Fix pytest discovery** — `pytest.ini` points to `mesas/test` (doesn't exist); tests are in `test/`
-2. **Formalise steady-state benchmarks** — rewrite `test_time.py` as proper pytest with assertions and tolerances
-3. **Regression tests for examples** — `lower_hafren` and `hyporheic` examples with saved reference outputs
-4. **Mass-balance tests** — verify water/solute balance closure
-5. **Edge-case tests** — no solutes, single timestep, zero fluxes, etc.
-6. **Performance benchmark** — record wall-clock time for regression detection
-7. **Code coverage** — add pytest-cov, establish baseline
-8. **Pre-commit hooks** — ruff + black
-9. **CI** — GitHub Actions for Linux/macOS/Windows
+- [x] Fixed pytest discovery (`pytest.ini` and `pyproject.toml` pointed to wrong path)
+- [x] Added `test/conftest.py` with autouse chdir fixture
+- [x] Wrote `test_stage0_benchmarks.py` — 4 analytical benchmarks (3 steady, 1 unsteady)
+- [x] Wrote `test_stage0_examples.py` — regression tests for lower_hafren and hyporheic
+- [x] Wrote `test_stage0_mass_balance.py` — water balance + solute balance closure tests
+- [x] Wrote `test_stage0_edge_cases.py` — no solutes, short timeseries, numerical schemes, piecewise segments, result accessors
+- [x] Wrote `test_stage0_performance.py` — 4 wall-clock benchmarks
+- [x] **Fixed bug in `solve.f90` SoluteBalance calculation** — removed erroneous `*dt` factor on mT storage terms that broke solute mass conservation
+- [x] Added pytest-cov config (baseline: 44% coverage)
+- [x] Added ruff config to pyproject.toml
+- [x] Added `.pre-commit-config.yaml` with ruff linter + formatter
+- [x] Added GitHub Actions CI (`.github/workflows/tests.yml`) for Linux/macOS, Python 3.10/3.11
+- [x] All 46 new tests pass (60 total, 2 pre-existing path failures in test_time.py/test_time2.py)
 
 ## Not Yet Started
 
@@ -53,13 +53,17 @@ Items to complete (in order):
 
 4. **Build system is broken on NumPy >= 2.0** — `setup.py` uses removed `numpy.distutils`. The package currently only builds on older NumPy. Stage 2 addresses this.
 
-5. **Branch topology:** `stochastic` == `master` in content, both ahead of `origin/main`. The refactoring work is being done on `stochastic`.
+5. **Branch topology:** `stochastic` is the active development branch. Refactoring work is done here.
 
-6. **The Fortran solver must be installed** for any tests to run. Ensure `pip install .` (or equivalent) has been done in the environment before running pytest.
+6. **The Fortran solver must be installed** for any tests to run. Use `conda run -n mesas11 pip install --no-build-isolation -e .` to build.
+
+7. **Water/solute balance tests use `record_state=True`** — the balance arrays are only meaningful when all consecutive timesteps are recorded. Example tests (large datasets) check only age=0 with default `record_state=False`.
+
+8. **SoluteBalance bug was fixed** — `solve.f90` lines 457-464 had `mT*dt` where it should have been just `mT` (paralleling the WaterBalance formula which uses `sT` without `*dt`).
 
 ## Environment Notes
 
 - Platform: macOS (Darwin 23.4.0)
-- Python: check with `python --version`
-- The package must be built from source (Fortran compilation required) before tests can run
-- Conda environment likely needed (see `environment.yml`)
+- Conda environment: `mesas11` (Python 3.11.9, NumPy 1.26.4)
+- All commands must use `conda run -n mesas11` prefix
+- Pre-commit hooks installed (ruff linter + formatter)
