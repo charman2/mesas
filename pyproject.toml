@@ -50,3 +50,19 @@ packages = ["mesas", "mesas.sas", "mesas.me", "mesas.utils"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
+
+[tool.coverage.run]
+source = ["mesas"]
+omit = ["mesas/me/*", "mesas/dev/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 0
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

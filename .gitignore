@@ -30,3 +30,5 @@ test/*.pdf
 examples/Archive.zip
 examples/data_with_results.csv
 test/MESASct.py
+.coverage
+*.egg-info/
