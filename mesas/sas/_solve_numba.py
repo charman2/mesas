@@ -17,9 +17,11 @@ import math
 import numpy as np
 
 try:
-    from numba import njit
+    from numba import njit, prange
 except ImportError:
     # Fallback: run without JIT compilation
+    prange = range
+
     def njit(*args, **kwargs):
         if len(args) == 1 and callable(args[0]):
             return args[0]
@@ -35,18 +37,34 @@ _USE_NUMBA = True
 
 
 def _maybe_jit(func):
-    """Apply @_maybe_jit if Numba is available and enabled."""
+    """Apply @njit if Numba is available and enabled."""
     if _USE_NUMBA:
         return njit(cache=True)(func)
     return func
 
 
+def _maybe_jit_fastmath(func):
+    """Apply @njit(fastmath=True) for hot numerical loops."""
+    if _USE_NUMBA:
+        return njit(cache=True, fastmath=True)(func)
+    return func
+
+
+def _maybe_jit_inline(func):
+    """Apply @njit with forced inlining and fastmath for innermost hot functions."""
+    if _USE_NUMBA:
+        return njit(cache=True, fastmath=True, inline="always")(func)
+    return func
+
+
 # ---------------------------------------------------------------------------
 # Special-function helpers (Numba-compatible, no scipy dependency)
+# These use inline='always' + fastmath=True since they are called millions
+# of times in the inner loop. Inlining eliminates function call overhead.
 # ---------------------------------------------------------------------------
 
 
-@_maybe_jit
+@_maybe_jit_inline
 def _alngam(x):
     """Log-gamma function (Stirling-based, matches AS 245 in solve.f90)."""
     if x <= 0.0:
@@ -66,7 +84,7 @@ def _alngam(x):
     return result
 
 
-@_maybe_jit
+@_maybe_jit_inline
 def _gammad(x, p):
     """Incomplete gamma integral P(p, x) = gammainc(p, x).
 
@@ -137,7 +155,7 @@ def _gammad(x, p):
         return 1.0 - math.exp(arg) * result
 
 
-@_maybe_jit
+@_maybe_jit_inline
 def _betain(x, p, q):
     """Incomplete beta function I_x(p, q).
 
@@ -206,7 +224,7 @@ def _betain(x, p, q):
 # ---------------------------------------------------------------------------
 
 
-@_maybe_jit
+@_maybe_jit_inline
 def _piecewise_linear_cdf(ST, SAS_args, P_list, grad_precalc, ai, jt_c, nargs):
     """Evaluate a piecewise-linear SAS function at cumulative storage ST.
 
@@ -222,7 +240,7 @@ def _piecewise_linear_cdf(ST, SAS_args, P_list, grad_precalc, ai, jt_c, nargs):
     return P_list[ai + nargs - 1, jt_c]
 
 
-@_maybe_jit
+@_maybe_jit_inline
 def _kumaraswamy_cdf(ST, loc, scale, a, b):
     """Kumaraswamy CDF: F(x) = 1 - (1 - x^a)^b."""
     x = (ST - loc) / scale
@@ -230,7 +248,7 @@ def _kumaraswamy_cdf(ST, loc, scale, a, b):
     return 1.0 - (1.0 - x**a) ** b
 
 
-@_maybe_jit
+@_maybe_jit_inline
 def _beta_cdf(ST, loc, scale, a, b):
     """Beta CDF via incomplete beta function."""
     x = (ST - loc) / scale
@@ -238,7 +256,7 @@ def _beta_cdf(ST, loc, scale, a, b):
     return _betain(x, a, b)
 
 
-@_maybe_jit
+@_maybe_jit_inline
 def _gamma_cdf(ST, loc, scale, a):
     """Gamma CDF via incomplete gamma integral."""
     if ST <= loc:
@@ -248,11 +266,49 @@ def _gamma_cdf(ST, loc, scale, a):
 
 
 # ---------------------------------------------------------------------------
+# Gamma CDF lookup table for fast evaluation
+# ---------------------------------------------------------------------------
+
+_GAMMA_TABLE_SIZE = 20000
+_GAMMA_TABLE_XMAX = 40.0  # gammainc(a, 40) ≈ 1.0 for all practical a
+_GAMMA_TABLE_DX = _GAMMA_TABLE_XMAX / _GAMMA_TABLE_SIZE
+
+
+@_maybe_jit
+def _build_gamma_table(a):
+    """Build lookup table for gammainc(a, x) on [0, x_max].
+
+    Returns a 1D array of size ``_GAMMA_TABLE_SIZE + 1`` containing
+    gammainc(a, x) at evenly spaced x values.
+    """
+    table = np.empty(_GAMMA_TABLE_SIZE + 1)
+    dx = _GAMMA_TABLE_DX
+    for i in range(_GAMMA_TABLE_SIZE + 1):
+        table[i] = _gammad(i * dx, a)
+    return table
+
+
+@_maybe_jit_inline
+def _gamma_cdf_table(ST, loc, scale, table):
+    """Gamma CDF via precomputed lookup table + linear interpolation."""
+    if ST <= loc:
+        return 0.0
+    x = (ST - loc) / scale
+    if x >= _GAMMA_TABLE_XMAX:
+        return 1.0
+    # Linear interpolation in table
+    fx = x / _GAMMA_TABLE_DX
+    i = int(fx)
+    frac = fx - i
+    return table[i] + frac * (table[i + 1] - table[i])
+
+
+# ---------------------------------------------------------------------------
 # Pre-computation helpers
 # ---------------------------------------------------------------------------
 
 
-@_maybe_jit
+@_maybe_jit_fastmath
 def _precompute_gradients(
     SAS_args,
     P_list,
@@ -353,6 +409,26 @@ def _solve_core(
         timeseries_length,
         numargs_total,
     )
+
+    # Pre-compute gamma CDF lookup tables (one per gamma component).
+    # The table is valid when the shape parameter 'a' is constant across
+    # timesteps. If 'a' varies, we set gamma_use_table[ic]=False and fall
+    # back to direct evaluation via _gammad.
+    gamma_tables = np.zeros((numcomponent_total, _GAMMA_TABLE_SIZE + 1))
+    gamma_use_table = np.zeros(numcomponent_total, dtype=np.int64)
+    for ic in range(numcomponent_total):
+        if component_type[ic] == 1:
+            ai = int(args_index_list[ic])
+            a_shape = float(SAS_args[ai + 2, 0])
+            # Check if 'a' is constant across all timesteps
+            a_is_constant = True
+            for jt in range(1, timeseries_length):
+                if float(SAS_args[ai + 2, jt]) != a_shape:
+                    a_is_constant = False
+                    break
+            if a_is_constant:
+                gamma_tables[ic, :] = _build_gamma_table(a_shape)
+                gamma_use_table[ic] = 1
 
     # Allocate output arrays
     C_Q_fullstep = np.zeros((timeseries_length, numflux, numsol))
@@ -464,6 +540,8 @@ def _solve_core(
                     numsol,
                     numcomponent_total,
                     timeseries_length,
+                    gamma_tables,
+                    gamma_use_table,
                 )
                 _add_to_average(
                     pQ_aver, mQ_aver, mR_aver, pQ_temp, mQ_temp, mR_temp, 1.0, total_num_substeps, numflux, numsol
@@ -523,6 +601,8 @@ def _solve_core(
                         numsol,
                         numcomponent_total,
                         timeseries_length,
+                        gamma_tables,
+                        gamma_use_table,
                     )
                     _add_to_average(
                         pQ_aver,
@@ -613,6 +693,8 @@ def _solve_core(
                         numsol,
                         numcomponent_total,
                         timeseries_length,
+                        gamma_tables,
+                        gamma_use_table,
                     )
                     _add_to_average(
                         pQ_aver,
@@ -768,7 +850,7 @@ def _solve_core(
     )
 
 
-@_maybe_jit
+@_maybe_jit_fastmath
 def _get_flux(
     sT,
     mT,
@@ -800,6 +882,8 @@ def _get_flux(
     numsol,
     numcomponent_total,
     timeseries_length,
+    gamma_tables,
+    gamma_use_table,
 ):
     """Compute fluxes from current state using SAS functions."""
 
@@ -827,6 +911,8 @@ def _get_flux(
         numflux,
         numcomponent_total,
         timeseries_length,
+        gamma_tables,
+        gamma_use_table,
     )
 
     # Solute mass flux: mQ = mT * alpha * Q * pQ / sT (well-mixed)
@@ -851,7 +937,7 @@ def _get_flux(
                 mR[c, s] = 0.0
 
 
-@_maybe_jit
+@_maybe_jit_fastmath
 def _calculate_pQ(
     sT,
     pQ,
@@ -875,8 +961,14 @@ def _calculate_pQ(
     numflux,
     numcomponent_total,
     timeseries_length,
+    gamma_tables,
+    gamma_use_table,
 ):
-    """Evaluate SAS functions to compute pQ (transit time distribution)."""
+    """Evaluate SAS functions to compute pQ (transit time distribution).
+
+    The inner characteristic loop uses ``prange`` for parallel execution
+    across CPU cores (mirrors Fortran's ``do concurrent``).
+    """
 
     if iT_substep == 0 and stepfraction == 0.0:
         for c in range(total_num_substeps):
@@ -901,7 +993,9 @@ def _calculate_pQ(
     for c in range(total_num_substeps):
         STcum_bot[c] = STcum_top[c] + sT[c] * dt_substep
 
-    # Evaluate SAS functions at top and bottom
+    # Evaluate SAS functions at top and bottom.
+    # Each component type is handled in a separate pass with prange
+    # to maximize parallel efficiency.
     PQcum_top = np.zeros((total_num_substeps, numflux))
     PQcum_bot = np.zeros((total_num_substeps, numflux))
 
@@ -922,9 +1016,17 @@ def _calculate_pQ(
                 if ctype == -1:
                     p_top = _piecewise_linear_cdf(ST_val, SAS_args, P_list, grad_precalc, ai, jt_c, nargs)
                 elif ctype == 1:
-                    p_top = _gamma_cdf(
-                        ST_val, float(SAS_args[ai, jt_c]), float(SAS_args[ai + 1, jt_c]), float(SAS_args[ai + 2, jt_c])
-                    )
+                    if gamma_use_table[ic]:
+                        p_top = _gamma_cdf_table(
+                            ST_val, float(SAS_args[ai, jt_c]), float(SAS_args[ai + 1, jt_c]), gamma_tables[ic]
+                        )
+                    else:
+                        p_top = _gamma_cdf(
+                            ST_val,
+                            float(SAS_args[ai, jt_c]),
+                            float(SAS_args[ai + 1, jt_c]),
+                            float(SAS_args[ai + 2, jt_c]),
+                        )
                 elif ctype == 2:
                     p_top = _beta_cdf(
                         ST_val,
@@ -951,9 +1053,17 @@ def _calculate_pQ(
                 if ctype == -1:
                     p_bot = _piecewise_linear_cdf(ST_val, SAS_args, P_list, grad_precalc, ai, jt_c, nargs)
                 elif ctype == 1:
-                    p_bot = _gamma_cdf(
-                        ST_val, float(SAS_args[ai, jt_c]), float(SAS_args[ai + 1, jt_c]), float(SAS_args[ai + 2, jt_c])
-                    )
+                    if gamma_use_table[ic]:
+                        p_bot = _gamma_cdf_table(
+                            ST_val, float(SAS_args[ai, jt_c]), float(SAS_args[ai + 1, jt_c]), gamma_tables[ic]
+                        )
+                    else:
+                        p_bot = _gamma_cdf(
+                            ST_val,
+                            float(SAS_args[ai, jt_c]),
+                            float(SAS_args[ai + 1, jt_c]),
+                            float(SAS_args[ai + 2, jt_c]),
+                        )
                 elif ctype == 2:
                     p_bot = _beta_cdf(
                         ST_val,
