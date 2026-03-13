@@ -344,9 +344,10 @@ class Piecewise(_SASFunctionBase):
 
         if ST is not None:
             # Use the given ST values
-            assert ST[0] >= 0
-            # assert np.all(np.diff(ST) > 0)
-            assert len(ST) > 1
+            if len(ST) <= 1:
+                raise ValueError(f"ST must have at least 2 values, got {len(ST)}")
+            if ST[0] < 0:
+                raise ValueError(f"ST[0] must be >= 0, got {ST[0]}")
             self.nsegment = len(ST) - 1
             self._ST = np.array(ST, dtype=float)
             self._parameter_list = self._convert_ST_to_segment_list(self._ST)
@@ -372,10 +373,14 @@ class Piecewise(_SASFunctionBase):
         # Make a list of probabilities P
         if P is not None:
             # Use the supplied values
-            assert P[0] == 0
-            assert P[-1] == 1
-            assert np.all(np.diff(P) >= 0)
-            assert len(P) == len(self._ST)
+            if P[0] != 0:
+                raise ValueError(f"P must start at 0, got P[0]={P[0]}")
+            if P[-1] != 1:
+                raise ValueError(f"P must end at 1, got P[-1]={P[-1]}")
+            if not np.all(np.diff(P) >= 0):
+                raise ValueError("P must be non-decreasing")
+            if len(P) != len(self._ST):
+                raise ValueError(f"P length ({len(P)}) must match ST length ({len(self._ST)})")
             self._P = np.r_[P]
 
         else:
@@ -398,18 +403,16 @@ class Piecewise(_SASFunctionBase):
 
     @_SASFunctionBase.ST.setter
     def ST(self, new_ST: np.ndarray) -> None:
-        try:
-            assert new_ST[0] >= 0
-            assert np.all(np.diff(new_ST) > 0)
-            assert len(new_ST) > 1
-        except Exception as err:
-            print("Problem with new ST")
-            print(f"Attempting to set ST = {new_ST}")
-            if not np.all(np.diff(new_ST) > 0):
-                print(
-                    "   -- if ST values are not distinct, try changing 'ST_largest_segment' and/or 'ST_smallest_segment'"
-                )
-            raise err
+        if len(new_ST) <= 1:
+            raise ValueError(f"ST must have at least 2 values, got {len(new_ST)}")
+        if new_ST[0] < 0:
+            raise ValueError(f"ST[0] must be >= 0, got {new_ST[0]}")
+        if not np.all(np.diff(new_ST) > 0):
+            raise ValueError(
+                f"ST values must be strictly increasing. Got ST = {new_ST}. "
+                "If ST values are not distinct, try changing "
+                "'ST_largest_segment' and/or 'ST_smallest_segment'."
+            )
         self._ST = new_ST
         self.ST_min = self._ST[0]
         self.ST_max = self._ST[-1]
@@ -418,9 +421,12 @@ class Piecewise(_SASFunctionBase):
 
     @_SASFunctionBase.P.setter
     def P(self, new_P: np.ndarray) -> None:
-        assert new_P[0] == 0
-        assert new_P[-1] == 1
-        assert len(new_P) == len(self._ST)
+        if new_P[0] != 0:
+            raise ValueError(f"P must start at 0, got P[0]={new_P[0]}")
+        if new_P[-1] != 1:
+            raise ValueError(f"P must end at 1, got P[-1]={new_P[-1]}")
+        if len(new_P) != len(self._ST):
+            raise ValueError(f"P length ({len(new_P)}) must match ST length ({len(self._ST)})")
         self._P = new_P
         self._make_interpolators()
 
@@ -444,7 +450,8 @@ class Piecewise(_SASFunctionBase):
         Piecewise
             A new SAS function with ``nsegment + 1`` segments.
         """
-        assert segment < self.nsegment
+        if segment >= self.nsegment:
+            raise ValueError(f"segment index {segment} out of range (nsegment={self.nsegment})")
         P1 = self.P[segment]
         P2 = self.P[segment + 1]
         ST1 = self.ST[segment]
@@ -675,7 +682,7 @@ class Continuous(_SASFunctionBase):
                 self._argsS = []
                 self._argsS += [func_kwargs["loc"], func_kwargs["scale"]]
                 self._argsS += [func_kwargs["a"], func_kwargs["b"]]
-            self._argsP = np.ones_like(self._argsS) * np.NaN
+            self._argsP = np.ones_like(self._argsS) * np.nan
         elif self._use == "scipy.stats":
             # generate a piecewise approximation
             self.ST_max = float(ST_max)
@@ -712,14 +719,12 @@ class Continuous(_SASFunctionBase):
 
     @_SASFunctionBase.ST.setter
     def ST(self, new_ST: np.ndarray) -> None:
-        try:
-            assert new_ST[0] >= 0
-            assert np.all(np.diff(new_ST) > 0)
-            assert len(new_ST) > 1
-        except Exception as err:
-            print("Problem with new ST")
-            print(f"Attempting to set ST = {new_ST}")
-            raise err
+        if len(new_ST) <= 1:
+            raise ValueError(f"ST must have at least 2 values, got {len(new_ST)}")
+        if new_ST[0] < 0:
+            raise ValueError(f"ST[0] must be >= 0, got {new_ST[0]}")
+        if not np.all(np.diff(new_ST) > 0):
+            raise ValueError(f"ST values must be strictly increasing. Got ST = {new_ST}")
         if new_ST[-1] > self.ST_max:
             self._ST = new_ST
             self.ST_max = self._ST[-1]
@@ -729,9 +734,12 @@ class Continuous(_SASFunctionBase):
 
     @_SASFunctionBase.P.setter
     def P(self, new_P: np.ndarray) -> None:
-        assert new_P[0] == 0
-        assert new_P[-1] == 1
-        assert np.all(np.diff(new_P) >= 0)
+        if new_P[0] != 0:
+            raise ValueError(f"P must start at 0, got P[0]={new_P[0]}")
+        if new_P[-1] != 1:
+            raise ValueError(f"P must end at 1, got P[-1]={new_P[-1]}")
+        if not np.all(np.diff(new_P) >= 0):
+            raise ValueError("P must be non-decreasing")
         self._P = new_P
         # if self._has_params:
         self._ST = self.func.ppf(self._P)

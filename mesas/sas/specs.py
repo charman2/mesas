@@ -302,7 +302,8 @@ class Component:
         ST = self.expand(spec.pop("ST")) if "ST" in spec else _NoneList()
         P = self.expand(spec.pop("P")) if "P" in spec else _NoneList()
         if "args" in spec:
-            assert isinstance(spec["args"], dict)
+            if not isinstance(spec["args"], dict):
+                raise TypeError(f"Component '{label}': 'args' must be a dict, got {type(spec['args']).__name__}")
             argdict = OrderedDict()
             for arg, value in spec.pop("args").items():
                 argdict[arg] = self.expand(value)
@@ -318,9 +319,10 @@ class Component:
             ]
             if use == "scipy.stats":
                 self.type = -1
-            else:
-                assert use == "builtin"
+            elif use == "builtin":
                 self.type = self._sas_funs[0]._builtinfunctype
+            else:
+                raise ValueError(f"Component '{label}': 'use' must be 'builtin' or 'scipy.stats', got '{use}'")
         elif ST is not None:
             self.type = -1
             self._sas_funs = [Piecewise(ST=ST[i, :], P=P[i, :], **spec) for i in range(self.N)]

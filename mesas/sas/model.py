@@ -8,7 +8,8 @@ building and running SAS models.  A Model wraps:
 - optional solute transport parameters.
 
 Call :meth:`Model.run` to invoke the solver; results are then
-available through accessor methods (``get_sT``, ``get_pQ``, etc.).
+available through accessor methods (``get_sT``, ``get_pQ``, etc.) or
+through the :class:`ModelResult` object returned by :attr:`Model.result`.
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ from __future__ import annotations
 import copy
 import json
 import os
+import warnings
 from collections import OrderedDict
 from copy import deepcopy
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 import numpy as np
@@ -28,6 +31,219 @@ from mesas.sas.specs import SAS_Spec
 from ._solve_numba import solve
 
 dtype = np.float64
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ModelOptions:
+    """Options controlling model execution.
+
+    Parameters
+    ----------
+    dt : float
+        Timestep size. Default 1.
+    verbose : bool
+        Print solver progress. Default False.
+    num_scheme : int
+        Runge-Kutta scheme: 1 (Euler), 2 (RK2), or 4 (RK4). Default 4.
+    debug : bool
+        Enable debug output. Default False.
+    warning : bool
+        Print solver warnings. Default True.
+    jacobian : bool
+        Compute Jacobian arrays. Default False.
+    n_substeps : int
+        Number of sub-timesteps per full step. Default 1.
+    max_age : int or None
+        Maximum water age (timesteps). Defaults to timeseries length.
+    sT_init : np.ndarray or None
+        Initial age-ranked storage. Defaults to zeros of length *max_age*.
+    influx : str
+        Name of the influx column in the data DataFrame. Default ``"J"``.
+    ST_smallest_segment : float
+        Minimum piecewise segment length. Default 0.01.
+    ST_largest_segment : float
+        Maximum piecewise segment length. Default inf.
+    record_state : bool or str
+        If ``True``, record every timestep; if ``False``, record only the
+        last; if a string, treat it as a boolean column name in data_df.
+        Default False.
+    """
+
+    dt: float = 1.0
+    verbose: bool = False
+    num_scheme: int = 4
+    debug: bool = False
+    warning: bool = True
+    jacobian: bool = False
+    n_substeps: int = 1
+    max_age: int | None = None
+    sT_init: np.ndarray | None = field(default=None, repr=False)
+    influx: str = "J"
+    ST_smallest_segment: float = 1.0 / 100
+    ST_largest_segment: float = np.inf
+    record_state: bool | str = False
+
+    # Names of all valid option keys (for backward-compat dict validation)
+    _VALID_KEYS: frozenset[str] = field(
+        default=frozenset(
+            {
+                "dt",
+                "verbose",
+                "num_scheme",
+                "debug",
+                "warning",
+                "jacobian",
+                "n_substeps",
+                "max_age",
+                "sT_init",
+                "influx",
+                "ST_smallest_segment",
+                "ST_largest_segment",
+                "record_state",
+            }
+        ),
+        init=False,
+        repr=False,
+    )
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ModelOptions:
+        """Create from a dict, ignoring unknown keys with a warning."""
+        valid = {f.name for f in fields(cls) if f.init}
+        unknown = set(d) - valid
+        if unknown:
+            raise KeyError(f"Invalid options: {sorted(unknown)}")
+        return cls(**{k: v for k, v in d.items() if k in valid})
+
+    def update(self, d: dict) -> None:
+        """Update fields from a dict, raising on unknown keys."""
+        valid = {f.name for f in fields(self.__class__) if f.init}
+        unknown = set(d) - valid
+        if unknown:
+            raise KeyError(f"Invalid options: {sorted(unknown)}")
+        for k, v in d.items():
+            if k in valid:
+                setattr(self, k, v)
+
+    def to_dict(self) -> dict:
+        """Return a plain dict of all option values."""
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.init}
+
+
+@dataclass
+class SoluteSpec:
+    """Parameters for a single solute species.
+
+    Parameters
+    ----------
+    C_old : float
+        Concentration of water older than the initial condition. Default 0.
+    mT_init : float or str
+        Initial age-ranked solute mass. A float is broadcast; a string
+        is looked up as a column in data_df. Default 0.
+    k1 : float or str
+        First-order reaction rate. Default 0.
+    C_eq : float or str
+        Equilibrium concentration. Default 0.
+    alpha : dict[str, float or str]
+        Per-flux evapoconcentration factors. Defaults to 1.0 for each flux.
+    observations : dict or str
+        Observation column mapping for calibration. Default empty dict.
+    """
+
+    C_old: float = 0.0
+    mT_init: float | str = 0.0
+    k1: float | str = 0.0
+    C_eq: float | str = 0.0
+    alpha: dict[str, float | str] = field(default_factory=dict)
+    observations: dict | str = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, d: dict, flux_names: list[str]) -> SoluteSpec:
+        """Create from a legacy dict, filling in default alpha per flux."""
+        default_alpha = {flux: 1.0 for flux in flux_names}
+        alpha = d.get("alpha", default_alpha)
+        return cls(
+            C_old=d.get("C_old", 0.0),
+            mT_init=d.get("mT_init", 0.0),
+            k1=d.get("k1", 0.0),
+            C_eq=d.get("C_eq", 0.0),
+            alpha=alpha,
+            observations=d.get("observations", {}),
+        )
+
+    def to_dict(self) -> dict:
+        """Return a plain dict."""
+        return {
+            "C_old": self.C_old,
+            "mT_init": self.mT_init,
+            "k1": self.k1,
+            "C_eq": self.C_eq,
+            "alpha": self.alpha,
+            "observations": self.observations,
+        }
+
+
+class ModelResult:
+    """Container for SAS model results with attribute-style access.
+
+    Provides both dict-style (``result["sT"]``) and attribute-style
+    (``result.sT``) access to result arrays. Also provides snake_case
+    aliases for the camelCase result names.
+
+    Parameters
+    ----------
+    data : dict
+        Raw result dict from the solver.
+    """
+
+    # Map snake_case names -> original camelCase keys
+    _ALIASES: dict[str, str] = {
+        "water_balance": "WaterBalance",
+        "solute_balance": "SoluteBalance",
+    }
+    # Reverse map for deprecation warnings
+    _DEPRECATED: dict[str, str] = {
+        "WaterBalance": "water_balance",
+        "SoluteBalance": "solute_balance",
+    }
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def __getattr__(self, name: str) -> Any:
+        # Check snake_case aliases first
+        if name in self._ALIASES:
+            return self._data[self._ALIASES[name]]
+        if name in self._data:
+            return self._data[name]
+        raise AttributeError(f"No result named '{name}'")
+
+    def __getitem__(self, key: str) -> Any:
+        # Support deprecated camelCase keys with warning
+        if key in self._DEPRECATED:
+            new_name = self._DEPRECATED[key]
+            warnings.warn(
+                f"Result key '{key}' is deprecated, use '{new_name}' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return self._data[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def keys(self):
+        return self._data.keys()
+
+    def __repr__(self) -> str:
+        shapes = {k: v.shape if hasattr(v, "shape") else type(v).__name__ for k, v in self._data.items()}
+        return f"ModelResult({shapes})"
 
 
 def _processinputs(input: dict | str) -> dict:
@@ -97,29 +313,18 @@ class Model:
         # check for a configuration file
         if config:
             config = _processinputs(config)
-        # process any options
-        self._default_options = {
-            "dt": 1,
-            "verbose": False,
-            "num_scheme": 4,
-            "debug": False,
-            "warning": True,
-            "jacobian": False,
-            "n_substeps": 1,
-            "max_age": None,
-            "sT_init": None,
-            "influx": "J",
-            "ST_smallest_segment": 1.0 / 100,
-            "ST_largest_segment": np.inf,
-            "record_state": False,
-        }
-        self._options = self._default_options
-        components_to_learn = kwargs.get("components_to_learn")
-        if config and "options" in config.keys():
-            self.options = config["options"]
-        self.options = kwargs
+        # process options — build a ModelOptions dataclass
+        self._options_obj = ModelOptions()
+        components_to_learn = kwargs.pop("components_to_learn", None)
+        if config and "options" in config:
+            self._options_obj.update({k: v for k, v in config["options"].items() if k in ModelOptions._VALID_KEYS})
+        # Apply any kwargs that are valid options
+        opt_kwargs = {k: v for k, v in kwargs.items() if k in ModelOptions._VALID_KEYS}
+        if opt_kwargs:
+            self._options_obj.update(opt_kwargs)
+        self._apply_options()
         # get the SAS specification
-        if config and "sas_specs" in config.keys():
+        if config and "sas_specs" in config:
             sas_specs = config["sas_specs"]
         elif sas_specs:
             sas_specs = _processinputs(sas_specs)
@@ -129,7 +334,7 @@ class Model:
         self._numflux = len(self.sas_specs)
         self._fluxorder = list(self.sas_specs.keys())
         # get solute transport parameters
-        if config and "solute_parameters" in config.keys():
+        if config and "solute_parameters" in config:
             solute_parameters = config["solute_parameters"]
         elif solute_parameters:
             solute_parameters = _processinputs(solute_parameters)
@@ -139,11 +344,30 @@ class Model:
             "C_old": 0.0,
             "k1": 0.0,
             "C_eq": 0.0,
-            "alpha": dict((flux, 1.0) for flux in self._fluxorder),
+            "alpha": {flux: 1.0 for flux in self._fluxorder},
             "observations": {},
         }
         self.solute_parameters = solute_parameters
         self.components_to_learn = components_to_learn
+
+    def _apply_options(self) -> None:
+        """Resolve max_age, sT_init, and index_ts from current options."""
+        opts = self._options_obj
+        if opts.max_age is None:
+            opts.max_age = self._timeseries_length
+        if opts.max_age > self._timeseries_length:
+            raise ValueError(f"max_age ({opts.max_age}) cannot exceed timeseries_length ({self._timeseries_length})")
+        if opts.sT_init is None:
+            opts.sT_init = np.zeros(opts.max_age)
+        else:
+            opts.max_age = len(opts.sT_init)
+        self._max_age = opts.max_age
+        if opts.record_state is False:
+            self._index_ts = np.array([self._timeseries_length - 1])
+        elif opts.record_state is True:
+            self._index_ts = np.arange(self._timeseries_length)
+        else:
+            self._index_ts = np.where(self.data_df[opts.record_state])[0]
 
     def __repr__(self):
         """Creates a repr for the model"""
@@ -157,12 +381,18 @@ class Model:
         """Validate and convert raw SAS spec dicts into :class:`SAS_Spec` objects."""
         for flux, spec_in in sas_specs.items():
             spec = deepcopy(spec_in)
-            assert flux in self.data_df.columns
+            if flux not in self.data_df.columns:
+                raise ValueError(f"Flux '{flux}' not found in data_df columns. Available: {list(self.data_df.columns)}")
             if isinstance(spec, SAS_Spec):
                 sas_specs[flux] = spec
             else:
-                assert isinstance(spec, dict)
-                assert all([isinstance(component_spec, dict) for component_spec in spec.values()])
+                if not isinstance(spec, dict):
+                    raise TypeError(f"SAS spec for flux '{flux}' must be a dict or SAS_Spec, got {type(spec).__name__}")
+                for label, component_spec in spec.items():
+                    if not isinstance(component_spec, dict):
+                        raise TypeError(
+                            f"Component '{label}' of flux '{flux}' must be a dict, got {type(component_spec).__name__}"
+                        )
                 sas_specs[flux] = SAS_Spec(spec, self.data_df)
         return sas_specs
 
@@ -170,10 +400,12 @@ class Model:
         """Return a deep copy of this model with results cleared."""
         return Model(
             copy.deepcopy(self._data_df),
-            copy.deepcopy(self._sas_specs),
-            copy.deepcopy(self._solute_parameters),
-            copy.deepcopy(self._components_to_learn),
-            **copy.deepcopy(self._options),
+            sas_specs=copy.deepcopy(self._sas_specs),
+            solute_parameters=copy.deepcopy(self._solute_parameters),
+            components_to_learn=copy.deepcopy(
+                self._components_to_learn if hasattr(self, "_components_to_learn") else None
+            ),
+            **copy.deepcopy(self._options_obj.to_dict()),
         )
 
     def subdivided_copy(self, flux, label, segment):
@@ -211,18 +443,19 @@ class Model:
         raise AttributeError("solorder property is read-only")
 
     @property
-    def result(self):
-        """Results of running the sas model with the current parameters. See :ref:`results`"""
+    def result(self) -> ModelResult:
+        """Results of running the SAS model. See :ref:`results`.
+
+        Returns a :class:`ModelResult` supporting both dict-style
+        (``result["sT"]``) and attribute-style (``result.sT``) access.
+        """
         if self._result is None:
-            raise AttributeError(
-                "results are only defined once the model is run. Use .run() method to generate results "
-            )
-        else:
-            return self._result
+            raise AttributeError("Results are only available after calling .run()")
+        return self._result
 
     @result.setter
-    def result(self, result):
-        raise AttributeError("Model results are read-only. Use .run() method to generate results ")
+    def result(self, result: Any) -> None:
+        raise AttributeError("Model results are read-only. Use .run() method to generate results.")
 
     @property
     def data_df(self):
@@ -240,31 +473,22 @@ class Model:
         self._timeseries_length = len(self._data_df)
 
     @property
-    def options(self):
-        """Options for running the model. See :ref:`options`"""
-        return self._options
+    def options(self) -> dict:
+        """Options for running the model (returns a dict for backward compat).
+
+        Assign a dict to update options. Use ``model.options_obj`` to access
+        the :class:`ModelOptions` dataclass directly.
+        """
+        return self._options_obj.to_dict()
 
     @options.setter
-    def options(self, new_options):
-        new_options = _processinputs(new_options)
-        invalid_options = [optkey for optkey in new_options.keys() if optkey not in self._default_options.keys()]
-        if any(invalid_options):
-            raise KeyError("Invalid options: {}".format(invalid_options))
-        self._options.update(new_options)
-        if self._options["max_age"] is None:
-            self._options["max_age"] = self._timeseries_length
-        assert self._options["max_age"] <= self._timeseries_length
-        if self._options["sT_init"] is None:
-            self._options["sT_init"] = np.zeros(self._options["max_age"])
+    def options(self, new_options: dict | ModelOptions) -> None:
+        if isinstance(new_options, ModelOptions):
+            self._options_obj = new_options
         else:
-            self._options["max_age"] = len(self._options["sT_init"])
-        self._max_age = self._options["max_age"]
-        if self._options["record_state"] is False:
-            self._index_ts = np.array([self._timeseries_length - 1])
-        elif self._options["record_state"] is True:
-            self._index_ts = np.arange(self._timeseries_length)
-        else:
-            self._index_ts = np.where(self.data_df[self._options["record_state"]])[0]
+            new_options = _processinputs(new_options)
+            self._options_obj.update(new_options)
+        self._apply_options()
 
     @property
     def sas_specs(self):
@@ -448,9 +672,10 @@ class Model:
         Results are accessible via :attr:`result` and the ``get_*`` methods.
         """
         # --- 1. Extract water flux timeseries ---
-        J = self.data_df[self.options["influx"]].values  # influx [T]
+        opts = self._options_obj
+        J = self.data_df[opts.influx].values  # influx [T]
         Q = self.data_df[self._fluxorder].values  # outfluxes [T, numflux]
-        sT_init = self.options["sT_init"]
+        sT_init = opts.sT_init
         timeseries_length = self._timeseries_length
         numflux = self._numflux
 
@@ -467,14 +692,14 @@ class Model:
         numsol = max(self._numsol, 1)
 
         # --- 4. Unpack scalar options ---
-        dt = self.options["dt"]
-        verbose = self.options["verbose"]
-        debug = self.options["debug"]
-        warning = self.options["warning"]
-        jacobian = self.options["jacobian"]
-        n_substeps = self.options["n_substeps"]
-        max_age = self.options["max_age"]
-        num_scheme = self.options["num_scheme"]
+        dt = opts.dt
+        verbose = opts.verbose
+        debug = opts.debug
+        warning = opts.warning
+        jacobian = opts.jacobian
+        n_substeps = opts.n_substeps
+        max_age = opts.max_age
+        num_scheme = opts.num_scheme
 
         # Which timesteps to record (depends on record_state option)
         index_ts = self._index_ts
@@ -523,34 +748,41 @@ class Model:
         # --- 6. Store results ---
         # Solver arrays use (timestep, ..., age) ordering; moveaxis converts
         # the last axis (age) to the first so Python arrays are (age, timestep, ...).
+        result_data = {}
         if self._numsol > 0:
-            self._result = {"C_Q": C_Q}
+            result_data["C_Q"] = C_Q
             # Write predicted concentrations back into the DataFrame
             for isol, sol in enumerate(self._solorder):
                 for iflux, flux in enumerate(self._fluxorder):
                     colname = sol + " --> " + flux
                     self._data_df[colname] = C_Q[:, iflux, isol]
-        else:
-            self._result = {}
-        self._result.update(
+        result_data.update(
             {
-                "sT": np.moveaxis(sT, -1, 0),  # age-ranked storage density
-                "pQ": np.moveaxis(pQ, -1, 0),  # age-ranked outflux probability
-                "WaterBalance": np.moveaxis(WaterBalance, -1, 0),  # conservation residual
-                "dsTdSj": np.moveaxis(dsTdSj, -1, 0),  # Jacobian of sT w.r.t. SAS params
+                "sT": np.moveaxis(sT, -1, 0),
+                "pQ": np.moveaxis(pQ, -1, 0),
+                # snake_case canonical name
+                "water_balance": np.moveaxis(WaterBalance, -1, 0),
+                # deprecated camelCase alias
+                "WaterBalance": np.moveaxis(WaterBalance, -1, 0),
+                "dsTdSj": np.moveaxis(dsTdSj, -1, 0),
             }
         )
         if self._numsol > 0:
-            self._result.update(
+            sb = np.moveaxis(SoluteBalance, -1, 0)
+            result_data.update(
                 {
-                    "mT": np.moveaxis(mT, -1, 0),  # age-ranked solute mass density
-                    "mQ": np.moveaxis(mQ, -1, 0),  # age-ranked solute outflux
-                    "mR": np.moveaxis(mR, -1, 0),  # age-ranked reaction mass
-                    "SoluteBalance": np.moveaxis(SoluteBalance, -1, 0),
+                    "mT": np.moveaxis(mT, -1, 0),
+                    "mQ": np.moveaxis(mQ, -1, 0),
+                    "mR": np.moveaxis(mR, -1, 0),
+                    # snake_case canonical name
+                    "solute_balance": sb,
+                    # deprecated camelCase alias
+                    "SoluteBalance": sb,
                     "dmTdSj": np.moveaxis(dmTdSj, -1, 0),
                     "dCdSj": dCdSj,
                 }
             )
+        self._result = ModelResult(result_data)
 
     def get_jacobian(self, mode="segment", logtransform=True):
         J = None
@@ -632,30 +864,33 @@ class Model:
     def _get_result(
         self, X: np.ndarray, timestep: int | None = None, agestep: int | None = None, inputtime: int | None = None
     ) -> np.ndarray:
+        n_given = sum(x is not None for x in (timestep, agestep, inputtime))
+        if n_given > 1:
+            raise ValueError("Only one of timestep, agestep, or inputtime may be given")
         if timestep is not None:
-            # Only one can be given
-            assert agestep is None
-            assert inputtime is None
             return X[:, timestep]
         if agestep is not None:
-            # Only one can be given
-            assert timestep is None
-            assert inputtime is None
             return X[agestep, :]
         if inputtime is not None:
-            # Only one can be given
-            assert agestep is None
-            assert timestep is None
             return np.diagonal(X, offset=inputtime)
         return X
 
-    def get_WaterBalance(self, **kwargs) -> np.ndarray:
+    def get_water_balance(self, **kwargs) -> np.ndarray:
         """Water conservation residual array, shape ``(max_age, n_output_steps)``.
 
         Should be near machine precision when ``record_state=True``.
         """
-        X = self.result["WaterBalance"]
+        X = self.result["water_balance"]
         return self._get_result(X, **kwargs)
+
+    def get_WaterBalance(self, **kwargs) -> np.ndarray:
+        """Deprecated: use :meth:`get_water_balance` instead."""
+        warnings.warn(
+            "get_WaterBalance() is deprecated, use get_water_balance()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_water_balance(**kwargs)
 
     def get_sT(self, **kwargs) -> np.ndarray:
         """Age-ranked storage density ``sT``, shape ``(max_age, n_output_steps)``."""
@@ -687,14 +922,23 @@ class Model:
         X = self.result["mR"][:, :, isol]
         return self._get_result(X, **kwargs)
 
-    def get_SoluteBalance(self, sol: str, **kwargs) -> np.ndarray:
+    def get_solute_balance(self, sol: str, **kwargs) -> np.ndarray:
         """Solute conservation residual for a given solute.
 
         Should be near machine precision when ``record_state=True``.
         """
         isol = list(self._solorder).index(sol)
-        X = self.result["SoluteBalance"][:, :, isol]
+        X = self.result["solute_balance"][:, :, isol]
         return self._get_result(X, **kwargs)
+
+    def get_SoluteBalance(self, sol: str, **kwargs) -> np.ndarray:
+        """Deprecated: use :meth:`get_solute_balance` instead."""
+        warnings.warn(
+            "get_SoluteBalance() is deprecated, use get_solute_balance()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_solute_balance(sol, **kwargs)
 
     def get_mQ(self, flux: str, sol: str, **kwargs) -> np.ndarray:
         """Age-ranked solute outflux ``mQ`` for a given flux and solute."""
@@ -706,5 +950,5 @@ class Model:
     def get_ST(self, **kwargs) -> np.ndarray:
         """Cumulative storage ``ST = cumsum(sT) * dt``."""
         sT = self.get_sT()
-        ST = np.cumsum(sT, axis=0) * self.options["dt"]
+        ST = np.cumsum(sT, axis=0) * self._options_obj.dt
         return self._get_result(ST, **kwargs)

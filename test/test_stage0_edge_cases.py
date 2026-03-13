@@ -7,6 +7,7 @@ These tests verify that the model handles boundary conditions gracefully:
 - Different numerical schemes
 - Piecewise SAS functions with various segment counts
 """
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -38,7 +39,7 @@ class TestNoSolutes:
         # Should have results for water but not solutes
         assert "sT" in model.result
         assert "pQ" in model.result
-        assert "WaterBalance" in model.result
+        assert "water_balance" in model.result
 
     def test_water_balance_no_solutes(self):
         data_df = _make_minimal_data()
@@ -50,7 +51,7 @@ class TestNoSolutes:
             record_state=True,
         )
         model.run()
-        wb = model.get_WaterBalance()
+        wb = model.get_water_balance()
         assert np.abs(wb).max() < 1e-10
 
 
@@ -69,7 +70,7 @@ class TestShortTimeseries:
         )
         model.run()
         assert model.result is not None
-        wb = model.get_WaterBalance()
+        wb = model.get_water_balance()
         assert np.abs(wb).max() < 1e-10
 
     def test_5_timesteps(self):
@@ -116,7 +117,7 @@ class TestNumericalSchemes:
                 record_state=True,
             )
             model.run()
-            wb_max = np.abs(model.get_WaterBalance()).max()
+            wb_max = np.abs(model.get_water_balance()).max()
             assert wb_max < 1e-10, f"Scheme {scheme}: WB max={wb_max}"
 
 
@@ -137,7 +138,7 @@ class TestPiecewiseSegments:
             record_state=True,
         )
         model.run()
-        wb = model.get_WaterBalance()
+        wb = model.get_water_balance()
         assert np.abs(wb).max() < 1e-10
 
 
@@ -178,12 +179,12 @@ class TestResultAccessors:
         mQ = model_with_results.get_mQ("Q", "C")
         assert mQ is not None
 
-    def test_get_WaterBalance(self, model_with_results):
-        wb = model_with_results.get_WaterBalance()
+    def test_get_water_balance(self, model_with_results):
+        wb = model_with_results.get_water_balance()
         assert wb is not None
 
-    def test_get_SoluteBalance(self, model_with_results):
-        sb = model_with_results.get_SoluteBalance("C")
+    def test_get_solute_balance(self, model_with_results):
+        sb = model_with_results.get_solute_balance("C")
         assert sb is not None
 
     def test_get_ST(self, model_with_results):
@@ -198,5 +199,5 @@ class TestResultAccessors:
             dt=0.1,
             verbose=False,
         )
-        with pytest.raises(AttributeError, match="results are only defined"):
+        with pytest.raises(AttributeError, match="[Rr]esults are only"):
             _ = model.result

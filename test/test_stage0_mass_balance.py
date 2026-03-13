@@ -12,9 +12,9 @@ These tests verify that:
 2. The solute balance at age > 0 is near zero (age 0 has structural residual)
 3. Output concentrations are finite and reasonable
 """
+
 import numpy as np
 import pandas as pd
-import pytest
 
 from mesas.sas.model import Model
 
@@ -35,11 +35,9 @@ class TestWaterBalance:
 
     def _check_water_balance(self, model, tolerance=1e-10):
         """Check that the full water balance matrix is near zero."""
-        wb = model.get_WaterBalance()
+        wb = model.get_water_balance()
         max_wb = np.abs(wb).max()
-        assert max_wb < tolerance, (
-            f"Water balance max residual: {max_wb} (tolerance: {tolerance})"
-        )
+        assert max_wb < tolerance, f"Water balance max residual: {max_wb} (tolerance: {tolerance})"
 
     def test_uniform_sas(self):
         data_df = _make_basic_data()
@@ -110,11 +108,9 @@ class TestSoluteBalance:
     TOLERANCE = 1e-10
 
     def _check_solute_balance(self, model, sol):
-        sb = model.get_SoluteBalance(sol)
+        sb = model.get_solute_balance(sol)
         max_sb = np.abs(sb).max()
-        assert max_sb < self.TOLERANCE, (
-            f"Solute balance max residual: {max_sb} (tolerance: {self.TOLERANCE})"
-        )
+        assert max_sb < self.TOLERANCE, f"Solute balance max residual: {max_sb} (tolerance: {self.TOLERANCE})"
 
     def test_solute_balance_uniform(self):
         data_df = _make_basic_data()
@@ -152,9 +148,7 @@ class TestSoluteBalance:
                 "Q1": {"Q1_SAS": {"ST": [0, 5.0]}},
                 "Q2": {"Q2_SAS": {"ST": [0, 5.0]}},
             },
-            solute_parameters={
-                "C": {"C_old": 1.0, "alpha": {"Q1": 0.5, "Q2": 1.5}}
-            },
+            solute_parameters={"C": {"C_old": 1.0, "alpha": {"Q1": 0.5, "Q2": 1.5}}},
             dt=0.1,
             verbose=False,
             record_state=True,

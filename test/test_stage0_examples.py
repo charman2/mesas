@@ -10,6 +10,7 @@ Reference values were captured from the current codebase and serve as a
 baseline. If a refactoring changes these values, the test will fail and
 the developer must verify the change is intentional before updating.
 """
+
 import numpy as np
 import pytest
 
@@ -46,7 +47,7 @@ class TestLowerHafren:
 
     def test_water_balance_closure(self, model):
         """Youngest-age water balance should be near machine precision."""
-        wb = model.get_WaterBalance()
+        wb = model.get_water_balance()
         assert np.abs(wb[0]).max() < 1e-10
 
 
@@ -71,5 +72,5 @@ class TestHyporheic:
         assert np.nanmin(C_pred) >= -1e-10
 
     def test_water_balance_closure(self, model):
-        wb = model.get_WaterBalance()
+        wb = model.get_water_balance()
         assert np.abs(wb[0]).max() < 1e-10

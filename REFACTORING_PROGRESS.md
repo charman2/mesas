@@ -5,7 +5,7 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 ## Current State
 
 **Branch:** `stochastic`
-**Working stage:** Stage 3 — COMPLETE
+**Working stage:** Stage 4 — COMPLETE
 **Last commit:** (uncommitted — ready for commit)
 
 ## Completed
@@ -79,9 +79,35 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 - [x] All 4 performance benchmarks pass
 - [x] Numba `@njit(cache=True)` compilation works — cached after first run
 
+### Stage 4: API Cleanup and Modernisation
+- [x] Created `ModelOptions` dataclass — replaces mutable default dict with typed, validated fields
+  - `from_dict()` / `update()` / `to_dict()` for backward compat with dict-based API
+  - Proper `KeyError` on invalid option names
+  - `_apply_options()` consolidates max_age/sT_init/index_ts resolution
+- [x] Created `SoluteSpec` dataclass — typed alternative to raw dicts for solute parameters
+  - `from_dict()` constructor fills in default alpha per flux
+  - Internal solute storage remains dict-based for backward compat
+- [x] Created `ModelResult` class — attribute-style and dict-style access to results
+  - `result.sT`, `result["sT"]`, `result.water_balance` all work
+  - Deprecated camelCase keys (`"WaterBalance"`, `"SoluteBalance"`) emit `DeprecationWarning`
+  - `__repr__` shows result shapes
+- [x] Standardised naming to snake_case
+  - Result keys: `water_balance` (was `WaterBalance`), `solute_balance` (was `SoluteBalance`)
+  - Methods: `get_water_balance()` (was `get_WaterBalance()`), `get_solute_balance()` (was `get_SoluteBalance()`)
+  - Old camelCase methods kept as deprecated aliases
+- [x] Replaced all `assert` statements with descriptive `ValueError`/`TypeError`
+  - `model.py`: `parse_sas_specs()`, `_get_result()`, `_apply_options()`
+  - `functions.py`: ST/P validation in `Piecewise` and `Continuous` constructors/setters
+  - `specs.py`: Component `args` validation
+  - Error messages include actual values and suggestions (e.g. ST_largest_segment hint)
+- [x] Fixed `np.NaN` → `np.nan` in `functions.py`
+- [x] Fixed `copy_without_results()` — handles missing `_components_to_learn`, uses keyword args
+- [x] Updated `mesas/__init__.py` to export `ModelOptions`, `ModelResult`, `SoluteSpec`
+- [x] Updated all 46 tests to use new snake_case API
+- [x] All 46 tests pass with `DeprecationWarning` treated as error (zero regressions)
+
 ## Not Yet Started
 
-- Stage 4: API Cleanup
 - Stage 5: Documentation Overhaul
 - Stage 6: Extended Testing
 
