@@ -5,8 +5,8 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 ## Current State
 
 **Branch:** `stochastic`
-**Working stage:** Stage 2 — COMPLETE
-**Last commit:** `79d7800` — Stage 2 meson-python build system
+**Working stage:** Stage 3 — COMPLETE
+**Last commit:** (uncommitted — ready for commit)
 
 ## Completed
 
@@ -61,9 +61,26 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 - [x] Editable install (`pip install -e .`) works
 - [x] All 46 Stage 0 tests pass — zero tolerance change
 
+### Stage 3: Replace the Fortran Solver
+- [x] Wrote `mesas/sas/_solve_numba.py` — pure Python + Numba replacement for `solve.f90`
+  - Implements all SAS function evaluators: piecewise-linear, gamma, beta, Kumaraswamy
+  - Includes Numba-compatible special functions (_alngam, _gammad, _betain) matching AS 245/239/63
+  - Core solver `_solve_core` with RK1/RK2/RK4 integration, identical to Fortran
+  - Public `solve()` wrapper handles array type/shape conversion (3D→2D, Fortran→C layout)
+- [x] Updated `model.py`: import from `_solve_numba`, use `np.ascontiguousarray` instead of `np.asfortranarray`
+- [x] Fixed off-by-one bug in STcum copy loop (`range(tns)` → `range(tns+1)`)
+- [x] Fixed Numba type inference: replaced array slices with full-array+offset indexing, explicit `float()` casts
+- [x] Removed Fortran from build system: no `'c'`/`'fortran'` languages in `meson.build`, removed f2py extension
+- [x] Added `numba` to project dependencies in `pyproject.toml`
+- [x] Updated CI: removed `compilers` dependency, added `numba`
+- [x] Fixed critical bug in `_gammad` (incomplete gamma integral): series branch had extra 1/p factor, continued fraction was missing `cc` counter and had wrong initial result
+- [x] Fixed reshape in `solve()` wrapper for `max_age < timeseries_length` cases (`.ravel()` before `.reshape()`)
+- [x] All 46 Stage 0 tests pass — including Lower Hafren (gamma SAS) and Hyporheic examples
+- [x] All 4 performance benchmarks pass
+- [x] Numba `@njit(cache=True)` compilation works — cached after first run
+
 ## Not Yet Started
 
-- Stage 3: Replace the Fortran Solver
 - Stage 4: API Cleanup
 - Stage 5: Documentation Overhaul
 - Stage 6: Extended Testing
@@ -80,7 +97,7 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 
 5. **Branch topology:** `stochastic` is the active development branch. Refactoring work is done here.
 
-6. **The Fortran solver must be installed** for any tests to run. Use `conda run -n mesas11 pip install --no-build-isolation -e .` to build.
+6. **Fortran is no longer required.** The solver is now pure Python + Numba. Build with `pip install --no-build-isolation -e .`.
 
 7. **Water/solute balance tests use `record_state=True`** — the balance arrays are only meaningful when all consecutive timesteps are recorded. Example tests (large datasets) check only age=0 with default `record_state=False`.
 

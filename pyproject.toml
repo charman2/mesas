@@ -1,5 +1,5 @@
 [build-system]
-requires = ["meson-python>=0.15", "numpy>=1.22", "meson>=1.1.0"]
+requires = ["meson-python>=0.15", "meson>=1.1.0"]
 build-backend = "mesonpy"
 
 [project]
@@ -26,7 +26,7 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
-  "Programming Language :: Fortran",
+  "Programming Language :: Python",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -37,6 +37,7 @@ requires-python = ">=3.10"
 dependencies = [
   "pandas",
   "numpy>1.22",
+  "numba",
   "scipy",
   "matplotlib"
 ]

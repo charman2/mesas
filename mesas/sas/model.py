@@ -7,7 +7,7 @@ building and running SAS models.  A Model wraps:
 - SAS function specifications (one per outflux), and
 - optional solute transport parameters.
 
-Call :meth:`Model.run` to invoke the Fortran solver; results are then
+Call :meth:`Model.run` to invoke the solver; results are then
 available through accessor methods (``get_sT``, ``get_pQ``, etc.).
 """
 
@@ -25,7 +25,7 @@ import pandas as pd
 
 from mesas.sas.specs import SAS_Spec
 
-from .solve import solvesas as solve
+from ._solve_numba import solve
 
 dtype = np.float64
 
@@ -440,7 +440,7 @@ class Model:
     def run(self) -> None:
         """Execute the SAS model with current parameters.
 
-        Calls the Fortran solver (``solvesas``) and stores results in
+        Calls the solver (``solve``) and stores results in
         ``self._result``.  Predicted outflux concentrations are also
         written back into ``self.data_df`` as columns named
         ``"<solute> --> <flux>"``.
@@ -458,9 +458,9 @@ class Model:
         SAS_args, P_list, weights, component_type, nC_list, nC_total, nargs_list, nargs_total = (
             self._create_sas_lookup()
         )
-        SAS_args = np.asfortranarray(SAS_args)
-        P_list = np.asfortranarray(P_list)
-        weights = np.asfortranarray(weights)
+        SAS_args = np.ascontiguousarray(SAS_args)
+        P_list = np.ascontiguousarray(P_list)
+        weights = np.ascontiguousarray(weights)
 
         # --- 3. Build solute input arrays ---
         C_J, mT_init, C_old, alpha, k1, C_eq = self._create_solute_inputs()
@@ -483,15 +483,15 @@ class Model:
         sT_init = sT_init[:max_age]
         mT_init = mT_init[:max_age, :]
 
-        # --- 5. Call the Fortran solver ---
+        # --- 5. Call the solver ---
         # The solver expects ~30 positional arguments in a specific order.
-        # SAS_args/P_list are transposed because Fortran uses column-major order.
+        # SAS_args/P_list are transposed (numargs_total, timeseries_length).
         fresult = solve(
             J,  # influx timeseries
             Q,  # outflux timeseries [T, numflux]
-            np.asfortranarray(SAS_args.T),  # SAS breakpoint ST values
-            np.asfortranarray(P_list.T),  # SAS breakpoint P values
-            np.asfortranarray(weights),  # component blending weights
+            np.ascontiguousarray(SAS_args.T),  # SAS breakpoint ST values
+            np.ascontiguousarray(P_list.T),  # SAS breakpoint P values
+            weights,  # component blending weights
             sT_init,  # initial age-ranked storage
             dt,  # timestep size
             verbose,
@@ -499,10 +499,10 @@ class Model:
             warning,
             jacobian,  # flags
             mT_init,  # initial age-ranked solute mass
-            np.asfortranarray(C_J),  # influx concentrations
-            np.asfortranarray(alpha),  # evapoconcentration factors
-            np.asfortranarray(k1),  # first-order reaction rates
-            np.asfortranarray(C_eq),  # equilibrium concentrations
+            C_J,  # influx concentrations
+            alpha,  # evapoconcentration factors
+            k1,  # first-order reaction rates
+            C_eq,  # equilibrium concentrations
             C_old,  # concentration of pre-initial water
             n_substeps,  # sub-timesteps per full step
             component_type,  # int type code per component
@@ -521,7 +521,7 @@ class Model:
         sT, pQ, WaterBalance, mT, mQ, mR, C_Q, dsTdSj, dmTdSj, dCdSj, SoluteBalance = fresult
 
         # --- 6. Store results ---
-        # Fortran arrays use (timestep, ..., age) ordering; moveaxis converts
+        # Solver arrays use (timestep, ..., age) ordering; moveaxis converts
         # the last axis (age) to the first so Python arrays are (age, timestep, ...).
         if self._numsol > 0:
             self._result = {"C_Q": C_Q}
