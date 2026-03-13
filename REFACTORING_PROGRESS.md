@@ -5,8 +5,8 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 ## Current State
 
 **Branch:** `stochastic`
-**Working stage:** Stage 1 — COMPLETE
-**Last commit:** `fa3f88f` — Stage 1 docstrings, type hints, comments, and variable renames
+**Working stage:** Stage 2 — COMPLETE
+**Last commit:** Stage 2 meson-python build system
 
 ## Completed
 
@@ -49,9 +49,20 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 - [x] Updated `mesas/__init__.py` with convenience import (`from mesas import Model`)
 - [x] All 46 Stage 0 tests pass — zero tolerance change
 
+### Stage 2: Fix the Build System
+- [x] Replaced `numpy.distutils` + `setup.py` with `meson-python` build backend
+- [x] Created `meson.build` files (root, mesas/, mesas/sas/, mesas/me/, mesas/utils/)
+- [x] f2py Fortran extension builds via `custom_target` + `py.extension_module`
+- [x] Updated `pyproject.toml`: meson-python backend, fixed classifiers (Fortran not Cython), `requires-python >= 3.10`
+- [x] Removed old `setup.py` and `recompile.sh`
+- [x] Cleaned up `mesas/sas/__init__.py` (removed DLL-loading hack for old build)
+- [x] Updated CI to install meson/ninja, added Python 3.12 and Windows to matrix
+- [x] Validated compiler flags portably (`fc.has_argument`)
+- [x] Editable install (`pip install -e .`) works
+- [x] All 46 Stage 0 tests pass — zero tolerance change
+
 ## Not Yet Started
 
-- Stage 2: Fix the Build System
 - Stage 3: Replace the Fortran Solver
 - Stage 4: API Cleanup
 - Stage 5: Documentation Overhaul
@@ -65,7 +76,7 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 
 3. **The `recursive_split` module is broken** — references `model.sas_blends` which doesn't exist (should be `sas_specs`). Same bug in `vis.py:plot_SAS_cumulative`. Don't fix these yet (that's Stage 1+), but be aware tests involving these modules will fail.
 
-4. **Build system is broken on NumPy >= 2.0** — `setup.py` uses removed `numpy.distutils`. The package currently only builds on older NumPy. Stage 2 addresses this.
+4. **Build system now uses meson-python** — replaced broken `numpy.distutils` + `setup.py`. Build with `pip install --no-build-isolation -e .` (requires meson, ninja, numpy in environment).
 
 5. **Branch topology:** `stochastic` is the active development branch. Refactoring work is done here.
 

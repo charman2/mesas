@@ -1,6 +1,6 @@
 [build-system]
-requires = ["numpy", "setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["meson-python>=0.15", "numpy>=1.22", "meson>=1.1.0"]
+build-backend = "mesonpy"
 
 [project]
 name = "mesas"
@@ -26,13 +26,14 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
-  "Programming Language :: Cython",
+  "Programming Language :: Fortran",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Physics",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
   "pandas",
   "numpy>1.22",
@@ -45,8 +46,6 @@ homepage = "https://mesas.readthedocs.io/"
 documentation = "https://mesas.readthedocs.io/"
 repository = "https://github.com/charman2/mesas"
 
-[tool.setuptools]
-packages = ["mesas", "mesas.sas", "mesas.me", "mesas.utils"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
