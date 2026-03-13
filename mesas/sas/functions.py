@@ -1,31 +1,27 @@
 """
 
-    ================
-    Module functions
-    ================
+================
+Module functions
+================
 
-    This module defines classes representing SAS functions.
+This module defines classes representing SAS functions.
 
-    Currently there are two classes : :class:`Piecewise` and :class:`Continuous`. The first allows the SAS function to be
-    specified as a set of breakpoints in a piecewise linear form of the cumulative distribution. The second allows any
-    distribution specified as a scipy.stats ``rv_continuous`` class to be used as a SAS function. However, it will be
-    converted into a piecewise form when the model is run.
+Currently there are two classes : :class:`Piecewise` and :class:`Continuous`. The first allows the SAS function to be
+specified as a set of breakpoints in a piecewise linear form of the cumulative distribution. The second allows any
+distribution specified as a scipy.stats ``rv_continuous`` class to be used as a SAS function. However, it will be
+converted into a piecewise form when the model is run.
 
-    Calling an instance of either class supplied with values of ST (as an array, list, or number) evaluates
-    the CDF, and returns corresponding cumulative probabilities. The :func:`Piecewise.inv` method takes cumulative probabilities and
-    returns values of ST.
+Calling an instance of either class supplied with values of ST (as an array, list, or number) evaluates
+the CDF, and returns corresponding cumulative probabilities. The :func:`Piecewise.inv` method takes cumulative probabilities and
+returns values of ST.
 
 """
 
-import copy
-
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.stats
 from scipy.interpolate import interp1d
 from scipy.stats import rv_continuous
-import scipy.stats
-import importlib
-
 
 
 class _SASFunctionBase:
@@ -44,14 +40,18 @@ class _SASFunctionBase:
 
         Uses scipy.optimize.interp1d
         """
-        self.interp1d_inv = interp1d(self.P, self.ST,
-                                     fill_value=(self.ST_min, self.ST_max),
-                                     kind='linear', copy=False,
-                                     bounds_error=False, assume_sorted=True)
-        self.interp1d = interp1d(self.ST, self.P,
-                                 fill_value=(0., 1.),
-                                 kind='linear', copy=False,
-                                 bounds_error=False, assume_sorted=True)
+        self.interp1d_inv = interp1d(
+            self.P,
+            self.ST,
+            fill_value=(self.ST_min, self.ST_max),
+            kind="linear",
+            copy=False,
+            bounds_error=False,
+            assume_sorted=True,
+        )
+        self.interp1d = interp1d(
+            self.ST, self.P, fill_value=(0.0, 1.0), kind="linear", copy=False, bounds_error=False, assume_sorted=True
+        )
 
     def __getitem__(self, i):
         return self
@@ -62,8 +62,8 @@ class _SASFunctionBase:
     # Next we define a number of properties. These act like attributes, but special functions
     # are called when the attributes are queried or assigned to
 
-    #@property
-    #def has_params(self):
+    # @property
+    # def has_params(self):
     #    return self._has_params
 
     @property
@@ -73,8 +73,8 @@ class _SASFunctionBase:
     @argsS.setter
     def argsS(self, new_args):
         raise NotImplementedError("Method for setting args directly has not been defined")
-    @property
 
+    @property
     def argsP(self):
         return None
 
@@ -139,8 +139,8 @@ class _SASFunctionBase:
             fig, ax = plt.subplots()
         return ax.plot(self.ST, self.P, **kwargs)
 
-    def get_jacobian(self, dCdSj, index=None, mode='segment', logtransform=True):
-        """ Calculates a limited jacobian of the model predictions """
+    def get_jacobian(self, dCdSj, index=None, mode="segment", logtransform=True):
+        """Calculates a limited jacobian of the model predictions"""
         raise NotImplementedError("get_jacobian not been defined")
 
 
@@ -182,7 +182,7 @@ class Piecewise(_SASFunctionBase):
 
     """
 
-    def __init__(self, ST=None, P=None, nsegment=1, ST_max=1., ST_min=0., auto='uniform'):
+    def __init__(self, ST=None, P=None, nsegment=1, ST_max=1.0, ST_min=0.0, auto="uniform"):
         """
         Initializes a Piecewise sas function.
 
@@ -196,46 +196,41 @@ class Piecewise(_SASFunctionBase):
 
         self.ST_min = float(ST_min)
         self.ST_max = float(ST_max)
-        #self._has_params = False
+        # self._has_params = False
 
         # Note that the variables _ST, _P and _parameter_list are assigned to below
         # instead of their corresponding properties. This is to avoid triggering the _make_interpolators function
         # until the end
 
         if ST is not None:
-
             # Use the given ST values
             assert ST[0] >= 0
-            #assert np.all(np.diff(ST) > 0)
+            # assert np.all(np.diff(ST) > 0)
             assert len(ST) > 1
             self.nsegment = len(ST) - 1
             self._ST = np.array(ST, dtype=float)
             self._parameter_list = self._convert_ST_to_segment_list(self._ST)
 
         else:
-
-
             self.nsegment = nsegment
 
-            if auto=='uniform':
+            if auto == "uniform":
                 self._ST = np.linspace(self.ST_min, self.ST_max, self.nsegment + 1)
                 self._parameter_list = self._convert_ST_to_segment_list(self._ST)
-            elif auto=='random':
+            elif auto == "random":
                 # Generate a random function
                 # Note this should probably be encapsulated in a function
                 self._ST = np.zeros(self.nsegment + 1)
                 ST_scaled = np.zeros(self.nsegment + 1)
-                ST_scaled[-1] = 1.
+                ST_scaled[-1] = 1.0
                 for i in range(self.nsegment - 1):
-                    ST_scaled[self.nsegment - i - 1] = np.random.uniform(
-                        0, ST_scaled[self.nsegment - i], 1)
+                    ST_scaled[self.nsegment - i - 1] = np.random.uniform(0, ST_scaled[self.nsegment - i], 1)
 
                 self._ST[:] = self.ST_min + (self.ST_max - self.ST_min) * ST_scaled
                 self._parameter_list = self._convert_ST_to_segment_list(self._ST)
 
         # Make a list of probabilities P
         if P is not None:
-
             # Use the supplied values
             assert P[0] == 0
             assert P[-1] == 1
@@ -244,14 +239,12 @@ class Piecewise(_SASFunctionBase):
             self._P = np.r_[P]
 
         else:
-
             # Make P equally-spaced
             self._P = np.linspace(0, 1, self.nsegment + 1, endpoint=True)
 
-        #self._has_params = True
+        # self._has_params = True
         # call this to make the interpolation functions
         self._make_interpolators()
-
 
     @property
     def argsS(self):
@@ -268,11 +261,12 @@ class Piecewise(_SASFunctionBase):
             assert np.all(np.diff(new_ST) > 0)
             assert len(new_ST) > 1
         except Exception as ex:
-            print('Problem with new ST')
-            print(f'Attempting to set ST = {new_ST}')
+            print("Problem with new ST")
+            print(f"Attempting to set ST = {new_ST}")
             if not np.all(np.diff(new_ST) > 0):
                 print(
-                    "   -- if ST values are not distinct, try changing 'ST_largest_segment' and/or 'ST_smallest_segment'")
+                    "   -- if ST values are not distinct, try changing 'ST_largest_segment' and/or 'ST_smallest_segment'"
+                )
             raise ex
         self._ST = new_ST
         self.ST_min = self._ST[0]
@@ -334,19 +328,19 @@ class Piecewise(_SASFunctionBase):
 
     def __repr__(self):
         """Return a repr of the SAS function"""
-        if not hasattr(self, 'nsegment'):
-            return 'Not initialized'
-        repr = '        ST: '
+        if not hasattr(self, "nsegment"):
+            return "Not initialized"
+        repr = "        ST: "
         for i in range(self.nsegment + 1):
-            repr += '{ST:<10.4}  '.format(ST=self.ST[i])
-        repr += '\n'
-        repr += '        P : '
+            repr += "{ST:<10.4}  ".format(ST=self.ST[i])
+        repr += "\n"
+        repr += "        P : "
         for i in range(self.nsegment + 1):
-            repr += '{P:<10.4}  '.format(P=self.P[i])
-        repr += '\n'
+            repr += "{P:<10.4}  ".format(P=self.P[i])
+        repr += "\n"
         return repr
 
-    def get_jacobian(self, dCdSj, index=None, mode='segment', logtransform=True):
+    def get_jacobian(self, dCdSj, index=None, mode="segment", logtransform=True):
         """
         Calculates a limited jacobian of the model predictions
 
@@ -354,7 +348,7 @@ class Piecewise(_SASFunctionBase):
 
         .. math:
 
-            J_{i,j}=\frac{\partial y_i}{\partial x_j}
+            J_{i,j}=\frac{\\partial y_i}{\\partial x_j}
 
         ..
 
@@ -381,7 +375,7 @@ class Piecewise(_SASFunctionBase):
 
         J_S = dCdSj[index, :]
 
-        if mode == 'endpoint':
+        if mode == "endpoint":
             return J_S
 
         # To get the derivative with respect to the segment length, we add up the derivative w.r.t. the
@@ -395,38 +389,41 @@ class Piecewise(_SASFunctionBase):
         else:
             return J_seg
 
-from scipy.stats import rv_continuous
+
 class kumaraswamy_gen(rv_continuous):
     "Kumaraswamy distribution"
-    def _cdf(self, x, a, b):
-        return 1 - (1 - x**a)**b
-    def _pdf(self, x, a, b):
-        return a*b*x**(a-1)*(1 - x**a)**(b-1)
 
-kumaraswamy = kumaraswamy_gen(a=0.0, b=1.0, name='kumaraswamy')
+    def _cdf(self, x, a, b):
+        return 1 - (1 - x**a) ** b
+
+    def _pdf(self, x, a, b):
+        return a * b * x ** (a - 1) * (1 - x**a) ** (b - 1)
+
+
+kumaraswamy = kumaraswamy_gen(a=0.0, b=1.0, name="kumaraswamy")
+
 
 class Continuous(_SASFunctionBase):
     """
     Base function for SAS functions
     """
 
-    _builtinfuncdict = {'gamma':1, 'beta':2, 'kumaraswamy':3}
-    def __init__(self, use, func, func_kwargs, P=None, nsegment=25, ST_max=1.797693134862315e+308):
+    _builtinfuncdict = {"gamma": 1, "beta": 2, "kumaraswamy": 3}
 
-
-        if use=='builtin' and func in self._builtinfuncdict.keys():
+    def __init__(self, use, func, func_kwargs, P=None, nsegment=25, ST_max=1.797693134862315e308):
+        if use == "builtin" and func in self._builtinfuncdict.keys():
             try:
                 self._func = getattr(scipy.stats, func)
             except AttributeError:
-                if func=='kumaraswamy':
+                if func == "kumaraswamy":
                     self._func = kumaraswamy
                 else:
                     self._func = None
             self._builtinfunctype = self._builtinfuncdict[func]
-        elif use=='scipy.stats' and isinstance(func, rv_continuous):
+        elif use == "scipy.stats" and isinstance(func, rv_continuous):
             self._func = func
             self._builtinfunctype = None
-        elif use=='scipy.stats' and isinstance(func, str):
+        elif use == "scipy.stats" and isinstance(func, str):
             self._func = getattr(scipy.stats, func)
             self._builtinfunctype = None
         else:
@@ -434,21 +431,21 @@ class Continuous(_SASFunctionBase):
         self._use = use
 
         self._frozen_func = self._func(**func_kwargs)
-        if self._use=='builtin':
-            if func == 'gamma':
+        if self._use == "builtin":
+            if func == "gamma":
                 self._argsS = []
-                self._argsS += [func_kwargs['loc'], func_kwargs['scale']]
-                self._argsS += [func_kwargs['a']]
-            if func == 'beta':
+                self._argsS += [func_kwargs["loc"], func_kwargs["scale"]]
+                self._argsS += [func_kwargs["a"]]
+            if func == "beta":
                 self._argsS = []
-                self._argsS += [func_kwargs['loc'], func_kwargs['scale']]
-                self._argsS += [func_kwargs['a'], func_kwargs['b']]
-            if func == 'kumaraswamy':
+                self._argsS += [func_kwargs["loc"], func_kwargs["scale"]]
+                self._argsS += [func_kwargs["a"], func_kwargs["b"]]
+            if func == "kumaraswamy":
                 self._argsS = []
-                self._argsS += [func_kwargs['loc'], func_kwargs['scale']]
-                self._argsS += [func_kwargs['a'], func_kwargs['b']]
-            self._argsP = np.ones_like(self._argsS)*np.NaN
-        elif self._use=='scipy.stats':
+                self._argsS += [func_kwargs["loc"], func_kwargs["scale"]]
+                self._argsS += [func_kwargs["a"], func_kwargs["b"]]
+            self._argsP = np.ones_like(self._argsS) * np.NaN
+        elif self._use == "scipy.stats":
             # generate a piecewise approximation
             self.ST_max = float(ST_max)
             # Make a list of probabilities P
@@ -486,8 +483,8 @@ class Continuous(_SASFunctionBase):
             assert np.all(np.diff(new_ST) > 0)
             assert len(new_ST) > 1
         except Exception as ex:
-            print('Problem with new ST')
-            print(f'Attempting to set ST = {new_ST}')
+            print("Problem with new ST")
+            print(f"Attempting to set ST = {new_ST}")
             raise ex
         if new_ST[-1] > self.ST_max:
             self._ST = new_ST
@@ -502,7 +499,7 @@ class Continuous(_SASFunctionBase):
         assert new_P[-1] == 1
         assert np.all(np.diff(new_P) >= 0)
         self._P = new_P
-        #if self._has_params:
+        # if self._has_params:
         self._ST = self.func.ppf(self._P)
 
     def inv(self, P):
@@ -519,22 +516,22 @@ class Continuous(_SASFunctionBase):
 
     def __repr__(self):
         """Return a repr of the SAS function"""
-        repr = f'       {self._func.name} distribution\n'
-        #if self._has_params:
-        repr += f'        parameters: {self._frozen_func.args}\n'
-        repr += '        Lookup table version:\n'
-        repr += '          ST: '
+        repr = f"       {self._func.name} distribution\n"
+        # if self._has_params:
+        repr += f"        parameters: {self._frozen_func.args}\n"
+        repr += "        Lookup table version:\n"
+        repr += "          ST: "
         for i in range(self.nsegment + 1):
-            repr += '{ST:<10.4}  '.format(ST=self.ST[i])
-        repr += '\n'
-        repr += '          P : '
+            repr += "{ST:<10.4}  ".format(ST=self.ST[i])
+        repr += "\n"
+        repr += "          P : "
         for i in range(self.nsegment + 1):
-            repr += '{P:<10.4}  '.format(P=self.P[i])
-        repr += '\n'
-        #else:
-            #repr = f'        (parameters not set)'
+            repr += "{P:<10.4}  ".format(P=self.P[i])
+        repr += "\n"
+        # else:
+        # repr = f'        (parameters not set)'
         return repr
 
-    def get_jacobian(self, dCdSj, index=None, mode='segment', logtransform=True):
-        """ Calculates a limited jacobian of the model predictions """
+    def get_jacobian(self, dCdSj, index=None, mode="segment", logtransform=True):
+        """Calculates a limited jacobian of the model predictions"""
         raise NotImplementedError("get_jacobian not been defined")

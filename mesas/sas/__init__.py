@@ -6,7 +6,6 @@ import ctypes
 import platform
 from pathlib import Path
 
-
 if platform.system() == "Windows":
     libs_dir = Path(__file__).parent.parent / ".libs"
     for lib in libs_dir.glob("*.dll"):

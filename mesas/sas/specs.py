@@ -1,16 +1,15 @@
-import copy
 from collections import OrderedDict
+from collections.abc import Iterable
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
-from collections.abc import Iterable
 
 from mesas.sas.functions import Continuous, Piecewise
 
-class SAS_Spec:
 
+class SAS_Spec:
     def __init__(self, spec, data_df):
         """
         Initializes a sas spec
@@ -40,32 +39,43 @@ class SAS_Spec:
         self.ST = None
         self.P = None
         for i in range(self.N):
-            self.ST_lists[i] = np.sort(np.unique(np.concatenate(
-                [component.sas_fun[i].ST for label, component in self.components.items()])))
+            self.ST_lists[i] = np.sort(
+                np.unique(np.concatenate([component.sas_fun[i].ST for label, component in self.components.items()]))
+            )
             self.P_lists[i] = np.zeros_like(self.ST_lists[i])
             for label, component in self.components.items():
                 self.P_lists[i] += component.sas_fun[i](self.ST_lists[i]) * component.weights.values[i]
             ST_min = self.ST_lists[i][0]
             ST_max = self.ST_lists[i][-1]
-            self._interp1d_inv[i] = interp1d(self.P_lists[i], self.ST_lists[i],
-                                             fill_value=(ST_min, ST_max),
-                                             kind='linear', copy=False,
-                                             bounds_error=False, assume_sorted=True)
-            self._interp1d[i] = interp1d(self.ST_lists[i], self.P_lists[i],
-                                         fill_value=(0., 1.),
-                                         kind='linear', copy=False,
-                                         bounds_error=False, assume_sorted=True)
+            self._interp1d_inv[i] = interp1d(
+                self.P_lists[i],
+                self.ST_lists[i],
+                fill_value=(ST_min, ST_max),
+                kind="linear",
+                copy=False,
+                bounds_error=False,
+                assume_sorted=True,
+            )
+            self._interp1d[i] = interp1d(
+                self.ST_lists[i],
+                self.P_lists[i],
+                fill_value=(0.0, 1.0),
+                kind="linear",
+                copy=False,
+                bounds_error=False,
+                assume_sorted=True,
+            )
         # create matricies of ST, P padded with extra values on the left
         maxj = np.max([len(ST) for ST in self.ST_lists])
         self.ST = np.zeros((maxj, self.N))
         self.P = np.zeros_like(self.ST)
         for i in range(self.N):
             Nj = len(self.ST_lists[i])
-            self.ST[maxj - Nj:maxj, i] = self.ST_lists[i]
-            self.P[maxj - Nj:maxj, i] = self.P_lists[i]
+            self.ST[maxj - Nj : maxj, i] = self.ST_lists[i]
+            self.P[maxj - Nj : maxj, i] = self.P_lists[i]
             if Nj < maxj:
-                self.ST[:maxj - Nj, i] = -1 - np.arange(maxj - Nj)
-                self.P[:maxj - Nj, i] = np.zeros(maxj - Nj)
+                self.ST[: maxj - Nj, i] = -1 - np.arange(maxj - Nj)
+                self.P[: maxj - Nj, i] = np.zeros(maxj - Nj)
         self.ST = self.ST.T
         self.P = self.P.T
 
@@ -91,7 +101,7 @@ class SAS_Spec:
 
     def __repr__(self):
         """produce a string representation of the spec"""
-        repr = ''
+        repr = ""
         for label, component in self.components.items():
             repr += component.__repr__()
         return repr
@@ -101,7 +111,8 @@ class SAS_Spec:
         Returns a list of the parameters in each component sas function
         """
         return np.concatenate(
-            [self.components[label].sas_fun.parameter_list for label in self._comp2learn_componentorder])
+            [self.components[label].sas_fun.parameter_list for label in self._comp2learn_componentorder]
+        )
 
     def update_from_parameter_list(self, parameter_list):
         """Modify the component sas functions using a modified parameter_list"""
@@ -109,7 +120,7 @@ class SAS_Spec:
         for label in self._comp2learn_componentorder:
             component = self.components[label]
             nparams = len(component.sas_fun.parameter_list)
-            component.sas_fun.parameter_list = parameter_list[starti: starti + nparams]
+            component.sas_fun.parameter_list = parameter_list[starti : starti + nparams]
             starti += nparams
         self.make_spec_ts()
 
@@ -117,10 +128,11 @@ class SAS_Spec:
         """Plot the component sas_functions"""
         if ax is None:
             fig, ax = plt.subplots()
-        componentlines = dict([(label, component.plot(ax=ax, **kwargs))
-                               for label, component in self.components.items()])
-        ax.set_xlabel('$S_T$')
-        ax.set_ylabel('$\Omega(S_T)$')
+        componentlines = dict(
+            [(label, component.plot(ax=ax, **kwargs)) for label, component in self.components.items()]
+        )
+        ax.set_xlabel("$S_T$")
+        ax.set_ylabel(r"$\Omega(S_T)$")
         ax.legend(frameon=False)
         return componentlines
 
@@ -133,9 +145,11 @@ class SAS_Spec:
         """
         if index is None:
             index = np.arange(self.N)
-        cat_me = [self.components[label].sas_fun.get_jacobian(*args, index=index, **kwargs).T *
-                  self.components[label].weights.values[index]
-                  for label in self._comp2learn_componentorder]
+        cat_me = [
+            self.components[label].sas_fun.get_jacobian(*args, index=index, **kwargs).T
+            * self.components[label].weights.values[index]
+            for label in self._comp2learn_componentorder
+        ]
         return np.concatenate(cat_me, axis=0).T
 
 
@@ -151,34 +165,34 @@ class Component:
         self._spec = spec.copy()
         self._data_df = data_df
         self.N = len(data_df)
-        self.weights = pd.Series(index=data_df.index, data=1.) if is_only_component else data_df[label]
-        ST = self.expand(spec.pop('ST')) if 'ST' in spec else _NoneList()
-        P = self.expand(spec.pop('P')) if 'P' in spec else _NoneList()
-        if 'args' in spec:
-            assert isinstance(spec['args'], dict)
+        self.weights = pd.Series(index=data_df.index, data=1.0) if is_only_component else data_df[label]
+        ST = self.expand(spec.pop("ST")) if "ST" in spec else _NoneList()
+        P = self.expand(spec.pop("P")) if "P" in spec else _NoneList()
+        if "args" in spec:
+            assert isinstance(spec["args"], dict)
             argdict = OrderedDict()
-            for arg, value in spec.pop('args').items():
+            for arg, value in spec.pop("args").items():
                 argdict[arg] = self.expand(value)
             self._args = [dict(zip(argdict, values)) for values in zip(*argdict.values())]
-            if 'scipy.stats' in spec:
-                use = 'scipy.stats'
-                func = spec.pop('scipy.stats')
+            if "scipy.stats" in spec:
+                use = "scipy.stats"
+                func = spec.pop("scipy.stats")
             else:
-                use = spec.pop('use', 'builtin')
-                func = spec.pop('func')
-            self._sas_funs = [Continuous(use, func, func_kwargs=self._args[i], P=P[i, :], **spec)
-                                  for i in range(self.N)]
-            if use == 'scipy.stats':
+                use = spec.pop("use", "builtin")
+                func = spec.pop("func")
+            self._sas_funs = [
+                Continuous(use, func, func_kwargs=self._args[i], P=P[i, :], **spec) for i in range(self.N)
+            ]
+            if use == "scipy.stats":
                 self.type = -1
             else:
-                assert use =='builtin'
+                assert use == "builtin"
                 self.type = self._sas_funs[0]._builtinfunctype
         elif ST is not None:
             self.type = -1
             self._sas_funs = [Piecewise(ST=ST[i, :], P=P[i, :], **spec) for i in range(self.N)]
         else:
             raise Exception(f"Insufficient information to specify SAS function for {label}")
-
 
     def expand(self, value):
         if isinstance(value, Iterable) and not isinstance(value, str):
@@ -213,11 +227,11 @@ class Component:
         return self._sas_funs[i]
 
     def __repr__(self):
-        repr = ''
+        repr = ""
         repr += self._spec.__repr__()
-        #repr += '    component = {}'.format(self.label) + '\n'
-        #for i in range(self.N):
-            #repr += self[i].__repr__()
+        # repr += '    component = {}'.format(self.label) + '\n'
+        # for i in range(self.N):
+        # repr += self[i].__repr__()
         return repr
 
     def plot(self, *args, **kwargs):
@@ -227,8 +241,6 @@ class Component:
 class _NoneList:
     def __init__(self):
         pass
+
     def __getitem__(self, *args, **kwargs):
         return None
-
-
-
