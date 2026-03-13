@@ -6,7 +6,7 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 
 **Branch:** `stochastic`
 **Working stage:** Stage 2 — COMPLETE
-**Last commit:** Stage 2 meson-python build system
+**Last commit:** `79d7800` — Stage 2 meson-python build system
 
 ## Completed
 
