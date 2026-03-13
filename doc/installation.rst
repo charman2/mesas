@@ -3,16 +3,41 @@
 Installation
 ============
 
-The current version of mesas.py can be installed using Conda with::
+From PyPI or conda-forge
+========================
+
+The simplest way to install mesas is with pip::
+
+    pip install mesas
+
+Or using Conda::
 
     conda install -c conda-forge mesas
 
-This will install any additional dependencies at the same time.
+Either method will install all required dependencies (NumPy, SciPy, pandas,
+Numba, matplotlib).
 
-Alternatively, the code can be obtained from GitHub: https://github.com/charman2/mesas. Note that a fortran compiler is required to build from source (but is not required to install through Conda).
+From source
+===========
 
-Clone the git repo and open a command prompt in the mesas directory (where the setup.py file sits). Make and install with::
+To install the latest development version from GitHub::
 
-.. code:: bash
+    git clone https://github.com/charman2/mesas.git
+    cd mesas
+    pip install -e .
 
-  pip install -e .
+.. note::
+
+   No Fortran compiler is needed. The numerical solver uses
+   `Numba <https://numba.pydata.org/>`_ for JIT compilation of
+   pure Python code.
+
+Requirements
+============
+
+- Python >= 3.10
+- NumPy >= 1.22
+- SciPy
+- pandas
+- Numba
+- matplotlib

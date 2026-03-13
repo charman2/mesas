@@ -48,6 +48,7 @@ Table of contents
 
    installation
    quickstart
+   concepts
 
 .. toctree::
    :maxdepth: 2
@@ -59,7 +60,6 @@ Table of contents
    solspec
    options
    results
-   visualization
 
 .. toctree::
    :maxdepth: 2

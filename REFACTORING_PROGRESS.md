@@ -5,7 +5,7 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 ## Current State
 
 **Branch:** `stochastic`
-**Working stage:** Stage 4 — COMPLETE
+**Working stage:** Stage 5 — COMPLETE
 **Last commit:** (uncommitted — ready for commit)
 
 ## Completed
@@ -106,9 +106,30 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 - [x] Updated all 46 tests to use new snake_case API
 - [x] All 46 tests pass with `DeprecationWarning` treated as error (zero regressions)
 
+### Stage 5: Documentation Overhaul
+- [x] Fixed ReadTheDocs build config
+  - Rewrote `readthedocs.yml` — pip-based install (no conda), Python 3.11, references `doc/conf.py`
+  - Added `[project.optional-dependencies] docs` to `pyproject.toml` (sphinx, sphinx-rtd-theme, sphinx-copybutton)
+  - Removed unused `environment.yaml`
+- [x] Modernised `conf.py`
+  - Dynamic version from package metadata
+  - Added `napoleon` extension for NumPy docstrings
+  - Added `sphinx-copybutton` for code block copy buttons
+  - Added intersphinx mappings for NumPy, SciPy, pandas
+  - Configured `autodoc` member ordering and type hints
+  - Removed outdated LaTeX paths and analytics placeholder
+- [x] Rewrote `installation.rst` — no Fortran compiler mention, documents Numba dependency
+- [x] Rewrote `quickstart.rst` — complete 6-step runnable tutorial (data creation → plotting)
+- [x] Added `concepts.rst` — SAS theory page with math (age-ranked storage, SAS functions, solute transport, time-varying params)
+- [x] Rewrote `options.rst` — complete reference for all 13 `ModelOptions` fields with types and defaults
+- [x] Rewrote `results.rst` — documents `ModelResult` class, getter methods, array ordering, deprecation notes
+- [x] Updated autodoc reference pages (`model.rst`, `functions.rst`, `specs.rst`)
+- [x] Removed empty `visualization.rst` (was "Under construction")
+- [x] Added `concepts` to index toctree
+- [x] `sphinx-build` completes successfully (2 warnings: transient network issue, minor autodoc duplicate)
+
 ## Not Yet Started
 
-- Stage 5: Documentation Overhaul
 - Stage 6: Extended Testing
 
 ## Key Decisions / Context for Future Sessions
