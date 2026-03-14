@@ -796,7 +796,7 @@ class Model:
                         J_seg = None
                         for iflux, flux in enumerate(self._comp2learn_fluxorder):
                             for label in self._components_to_learn[flux]:
-                                n_breakpoints = len(self.sas_specs[flux].components[label].sas_fun.P)
+                                n_breakpoints = len(self.sas_specs[flux].components[label].sas_fun[0].P)
                                 J_S = np.squeeze(
                                     self.result["dCdSj"][:, param_offset : param_offset + n_breakpoints, isolflux, isol]
                                 )
@@ -808,7 +808,7 @@ class Model:
                                     endpoint_to_segment = np.triu(np.ones(n_breakpoints), k=0)
                                     J_S = np.dot(endpoint_to_segment, J_S.T).T
                                     if logtransform:
-                                        J_S = J_S * self.sas_specs[flux].components[label].sas_fun._parameter_list
+                                        J_S = J_S * self.sas_specs[flux].components[label].sas_fun[0]._parameter_list
                                 if J_seg is None:
                                     J_seg = J_S
                                 else:

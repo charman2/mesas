@@ -5,8 +5,8 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 ## Current State
 
 **Branch:** `stochastic`
-**Working stage:** Stage 5 — COMPLETE
-**Last commit:** (uncommitted — ready for commit)
+**Working stage:** Stage 6 — COMPLETE
+**Last commit:** (see git log)
 
 ## Completed
 
@@ -128,9 +128,40 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 - [x] Added `concepts` to index toctree
 - [x] `sphinx-build` completes successfully (2 warnings: transient network issue, minor autodoc duplicate)
 
-## Not Yet Started
+### Stage 6: Extended Testing and Validation
+- [x] Added `hypothesis` dependency for property-based testing
+- [x] Wrote `test_stage6_property.py` — 10 property-based tests using Hypothesis
+  - Water balance closure (piecewise + gamma, randomised parameters)
+  - Storage non-negativity (sT >= 0)
+  - Probability constraints (pQ non-negative, cumulative bounded by 1)
+  - Output finiteness (concentrations and sT)
+  - Solute balance closure (with and without reactions)
+  - Numerical scheme consistency (Euler, RK2, RK4 all close water balance)
+- [x] Wrote `test_stage6_sas_functions.py` — 45 systematic SAS function tests
+  - Piecewise unit tests: CDF, inverse CDF, round-trip, clipping, subdivision, validation
+  - Continuous unit tests: gamma/beta/kumaraswamy CDF vs scipy reference, inverse CDF, argsS
+  - Model integration for all SAS types: piecewise, gamma, beta, kumaraswamy
+  - scipy.stats-backed SAS (piecewise approximation mode)
+  - Multiple fluxes with different SAS types
+  - First-order reactions with all SAS types
+- [x] Wrote `test_stage6_time_varying.py` — 13 time-varying parameter tests
+  - Piecewise with varying ST bounds (upper, both, multi-segment)
+  - Gamma/beta/kumaraswamy with varying scale and loc parameters
+  - Constant column vs scalar consistency check
+  - Time-varying reaction parameters (k1, C_eq)
+  - Multiple fluxes with different time-varying SAS
+  - Multiple solutes with different reactions
+- [x] Fixed `recursive_split.py` — replaced all `sas_blends` → `sas_specs` references
+- [x] Fixed `vis.py` — replaced all `sas_blends` → `sas_specs` references
+- [x] Fixed `sas_fun` list-vs-object bug — `Component.sas_fun` returns a list of per-timestep functions; all callers in `specs.py`, `model.py`, and `recursive_split.py` now use `sas_fun[0]` to access the representative function for parameter operations
+- [x] Wrote `test_stage6_recursive_split.py` — 4 tests for the estimation module
+  - Import succeeds (no broken references)
+  - `fit_model` converges (numerical jacobian) and reduces RMSE
+  - `fit_model` works with analytical jacobian mode
+  - `cross_validation_rmse` returns correct array of RMSE values
+- [x] All 114 tests pass (46 Stage 0 + 68 Stage 6)
 
-- Stage 6: Extended Testing
+## All Stages Complete
 
 ## Key Decisions / Context for Future Sessions
 
@@ -138,7 +169,7 @@ This document tracks progress against `REFACTORING_PLAN.md` so that a new sessio
 
 2. **All optional items were approved** except benchmarking against tran-SAS (Stage 6).
 
-3. **The `recursive_split` module is broken** — references `model.sas_blends` which doesn't exist (should be `sas_specs`). Same bug in `vis.py:plot_SAS_cumulative`. Don't fix these yet (that's Stage 1+), but be aware tests involving these modules will fail.
+3. **The `recursive_split` module has been fixed** — `sas_blends` → `sas_specs` references and `sas_fun` list indexing bugs are resolved. The `trim_unused_ST` method referenced in `increase_resolution_leftfirst` does not yet exist on Model.
 
 4. **Build system now uses meson-python** — replaced broken `numpy.distutils` + `setup.py`. Build with `pip install --no-build-isolation -e .` (requires meson, ninja, numpy in environment).
 

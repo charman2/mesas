@@ -5,8 +5,8 @@ of how water of different ages is stored and released, coloured by
 solute concentration.
 
 .. note::
-   ``plot_SAS_cumulative`` references ``model.sas_blends`` which was
-   renamed to ``sas_specs``.  This needs updating before use.
+   ``plot_SAS_cumulative`` references ``model.sas_specs`` for the
+   per-timestep SAS function lookup tables.
 """
 
 from __future__ import annotations
@@ -254,7 +254,7 @@ def plot_SAS_cumulative(model, flux, ax=None, sharex=None, i=0, artists_dict=Ord
         if i is None:
             i = 0
         (artists_dict[f"plot_SAS {flux}"],) = ax.plot(
-            model.sas_blends[flux].ST[i, :], model.sas_blends[flux].P[i, :], "bo-", lw=1.5
+            model.sas_specs[flux].ST[i, :], model.sas_specs[flux].P[i, :], "bo-", lw=1.5
         )  # , clip_on=False)
         ax.set_ylim([0, 1])
         ax.set_xlim(xmin=0)
@@ -267,7 +267,7 @@ def plot_SAS_cumulative(model, flux, ax=None, sharex=None, i=0, artists_dict=Ord
         ax.spines["left"].set_position(("outward", 10))
         ax.spines["bottom"].set_position(("outward", 10))
     if i is not None:
-        artists_dict[f"plot_SAS {flux}"].set_data(model.sas_blends[flux].ST[i, :], model.sas_blends[flux].P[i, :])
+        artists_dict[f"plot_SAS {flux}"].set_data(model.sas_specs[flux].ST[i, :], model.sas_specs[flux].P[i, :])
 
 
 def plot_transport_column_with_timeseries(model, flux, sol, i=0, fig=None, artists_dict=OrderedDict(), **kwargs):

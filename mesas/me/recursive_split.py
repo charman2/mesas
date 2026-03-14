@@ -3,11 +3,6 @@
 Estimates piecewise-constant SAS functions by iteratively splitting
 segments and optimising against observed solute concentrations using
 cross-validated least-squares.
-
-.. note::
-   This module references ``model.sas_blends`` in several places, which
-   was renamed to ``sas_specs`` in the current codebase.  These references
-   need updating before the module can be used at runtime.
 """
 
 from __future__ import annotations
@@ -108,12 +103,14 @@ def lookfor_new_components(
             else:
                 segment = segment_dict
 
-            nsegment = initial_model.sas_blends[flux].components[label].sas_fun.nsegment
+            nsegment = initial_model.sas_specs[flux].components[label].sas_fun[0].nsegment
             if segment < nsegment:
                 _verbose(f"Subdividing {flux} {label} segment {segment}")
 
                 largest_observed_ST = (initial_model.result["sT"].sum(axis=0) * initial_model.options["dt"]).max()
-                smallest_ST_in_subdivided_segment = initial_model.sas_blends[flux].components[label].sas_fun.ST[segment]
+                smallest_ST_in_subdivided_segment = (
+                    initial_model.sas_specs[flux].components[label].sas_fun[0].ST[segment]
+                )
                 if smallest_ST_in_subdivided_segment > largest_observed_ST:
                     _verbose("Subdivision is beyond observed ST. Shouldn't make a difference.")
                     subdivision_accepted = False
@@ -158,7 +155,7 @@ def lookfor_new_components(
                     _verbose(f"Subdivision accepted for {flux}, {label} segment {segment}")
 
                     # Add to the record of new components, and increment the counter
-                    new_components[flux][label] = new_model.sas_blends[flux].components[label]
+                    new_components[flux][label] = new_model.sas_specs[flux].components[label]
                     new_components_count += 1
                     last_accepted_model, last_accepted_rmse = new_model, new_rmse
 
@@ -221,8 +218,8 @@ def increase_resolution_scanning(
         for flux in new_components.keys():
             check_segment_dict[flux] = {}
             for label in new_components[flux].keys():
-                if max_segment < initial_model.sas_blends[flux].components[label].sas_fun.nsegment:
-                    max_segment = initial_model.sas_blends[flux].components[label].sas_fun.nsegment
+                if max_segment < initial_model.sas_specs[flux].components[label].sas_fun[0].nsegment:
+                    max_segment = initial_model.sas_specs[flux].components[label].sas_fun[0].nsegment
                 # start with segment 0
                 check_segment_dict[flux][label] = 0
 
@@ -276,7 +273,7 @@ def increase_resolution_scanning(
                         check_segment_dict[flux][label] += 1
                     if (
                         check_segment_dict[flux][label]
-                        < initial_model.sas_blends[flux].components[label].sas_fun.nsegment
+                        < initial_model.sas_specs[flux].components[label].sas_fun[0].nsegment
                     ):
                         check_segment_dict[flux][label] += 1
 
@@ -363,7 +360,7 @@ def increase_resolution_leftfirst(
         more_segments = False
         for flux in list(new_components.keys()).copy():
             for label in list(new_components[flux].keys()).copy():
-                if segment == initial_model.sas_blends[flux].components[label].sas_fun.nsegment - 1:
+                if segment == initial_model.sas_specs[flux].components[label].sas_fun[0].nsegment - 1:
                     # no more segments in this component, so delete it from the dict
                     _verbose(f"No more refinement for {flux}, {label}")
                     del new_components[flux][label]

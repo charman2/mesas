@@ -48,6 +48,12 @@ docs = [
   "sphinx-rtd-theme>=2.0",
   "sphinx-copybutton",
 ]
+test = [
+  "pytest>=7.0",
+  "pytest-cov",
+  "hypothesis",
+  "scikit-learn",
+]
 
 [project.urls]
 homepage = "https://mesas.readthedocs.io/"

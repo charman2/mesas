@@ -168,7 +168,7 @@ class SAS_Spec:
             1-D array of all SAS function parameters, ordered by component.
         """
         return np.concatenate(
-            [self.components[label].sas_fun.parameter_list for label in self._comp2learn_componentorder]
+            [self.components[label].sas_fun[0].parameter_list for label in self._comp2learn_componentorder]
         )
 
     def update_from_parameter_list(self, parameter_list: np.ndarray) -> None:
@@ -186,8 +186,8 @@ class SAS_Spec:
         starti = 0
         for label in self._comp2learn_componentorder:
             component = self.components[label]
-            nparams = len(component.sas_fun.parameter_list)
-            component.sas_fun.parameter_list = parameter_list[starti : starti + nparams]
+            nparams = len(component.sas_fun[0].parameter_list)
+            component.sas_fun[0].parameter_list = parameter_list[starti : starti + nparams]
             starti += nparams
         self.make_spec_ts()
 
@@ -243,7 +243,7 @@ class SAS_Spec:
         if index is None:
             index = np.arange(self.N)
         cat_me = [
-            self.components[label].sas_fun.get_jacobian(*args, index=index, **kwargs).T
+            self.components[label].sas_fun[0].get_jacobian(*args, index=index, **kwargs).T
             * self.components[label].weights.values[index]
             for label in self._comp2learn_componentorder
         ]
