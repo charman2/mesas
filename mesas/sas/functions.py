@@ -343,11 +343,17 @@ class Piecewise(_SASFunctionBase):
         # until the end
 
         if ST is not None:
-            # Use the given ST values
+            # Use the given ST values.
+            # Validation must match the ST property setter: the solver's
+            # piecewise evaluation silently drops CDF jumps at repeated
+            # breakpoints, and interp1d(assume_sorted=True) returns garbage
+            # for decreasing values.
             if len(ST) <= 1:
                 raise ValueError(f"ST must have at least 2 values, got {len(ST)}")
             if ST[0] < 0:
                 raise ValueError(f"ST[0] must be >= 0, got {ST[0]}")
+            if not np.all(np.diff(ST) > 0):
+                raise ValueError(f"ST values must be strictly increasing. Got ST = {np.asarray(ST)}")
             self.nsegment = len(ST) - 1
             self._ST = np.array(ST, dtype=float)
             self._parameter_list = self._convert_ST_to_segment_list(self._ST)
