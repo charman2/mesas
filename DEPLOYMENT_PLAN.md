@@ -6,19 +6,17 @@ tests green. Published artifacts today: conda-forge `mesas` up to `1.20240418`
 (Fortran build, `main` label). **Nothing is on PyPI — the name `mesas` is
 unclaimed.**
 
-## Step 0 — fix the version scheme (blocking)
+## Step 0 — fix the version scheme (done: `2.0.0a1`)
 
-`pyproject.toml` currently says `1.2026.0a1`. Both conda and pip compare the
-second segment numerically: `2026 < 20240418`, so **`1.2026.x` sorts *below*
-the already-published conda `1.20240418`** and would never be selected as the
+The original `1.2026.0a1` could not ship: both conda and pip compare the
+second segment numerically, and `2026 < 20240418`, so `1.2026.x` would sort
+*below* the already-published conda `1.20240418` and never be selected as the
 latest release.
 
-**Recommendation: `2.0.0a1`.** The Fortran→Numba rewrite is a genuine major
-version; `2.x` sorts above every historical `1.2024…` release and gives clean
-semver going forward. (CalVer alternative `2026.7.0a1` also sorts correctly if
-you prefer to keep date-based versions.)
-
-Change `version` in `pyproject.toml` and re-verify `mesas.__version__`.
+Resolved 2026-07-05: version set to `2.0.0a1` (in `pyproject.toml` and the
+`+dev` fallback in `mesas/__init__.py`). The Fortran→Numba rewrite is a
+genuine major version; `2.x` sorts above every historical `1.2024…` release
+and gives clean semver going forward.
 
 ## Step 1 — push and light up infrastructure
 

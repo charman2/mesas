@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mesas"
-version = "1.2026.0a1"
+version = "2.0.0a1"
 description = "MESAS - Multiscale Estimation of StorAge Selection."
 readme = "README.md"
 authors = [
