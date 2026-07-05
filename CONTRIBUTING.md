@@ -8,15 +8,15 @@
    cd mesas
    ```
 
-2. Create a conda environment with Fortran compiler support:
+2. Create a conda environment with the required dependencies:
    ```bash
-   conda create -n mesas-dev python=3.11 numpy">=1.22,<2" scipy pandas matplotlib pytest pytest-cov compilers pre-commit ruff -c conda-forge
+   conda create -n mesas-dev python=3.11 numpy">=1.22,<2" scipy pandas matplotlib numba pytest pytest-cov pre-commit ruff -c conda-forge
    conda activate mesas-dev
    ```
 
-3. Install the package in editable mode (requires Fortran compiler):
+3. Install the package in editable mode (no compiler needed -- the solver is pure Python, JIT-compiled with Numba):
    ```bash
-   pip install --no-build-isolation -e .
+   pip install -e .
    ```
 
 4. Install pre-commit hooks:
@@ -50,7 +50,7 @@ ruff format mesas/
   - `model.py` - `Model` class (main entry point)
   - `specs.py` - SAS specification and component classes
   - `functions.py` - SAS function implementations (piecewise, continuous)
-  - `solve.f90` - Fortran solver (characteristic method with RK integration)
+  - `_solve_numba.py` - Numba-accelerated solver (characteristic method with RK integration)
 - `mesas/me/` - Model estimation (recursive splitting)
 - `mesas/utils/` - Visualization utilities
 - `test/` - Test suite

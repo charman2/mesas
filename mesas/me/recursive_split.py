@@ -12,7 +12,6 @@ import inspect
 import numpy as np
 from scipy.optimize import least_squares
 from scipy.stats import ttest_rel
-from sklearn.model_selection import KFold
 
 VERBOSE = True
 
@@ -488,6 +487,13 @@ def fit_model(model, include_C_old=True, learn_fun=None, index=None, jacobian_mo
 
 
 def cross_validation_rmse(model, index=None, n_splits=3, **kwargs):
+    try:
+        from sklearn.model_selection import KFold
+    except ImportError as err:
+        raise ImportError(
+            "scikit-learn is required for k-fold cross-validation. "
+            "Install it with `pip install mesas[estimation]` (or `pip install scikit-learn`)."
+        ) from err
     if index is None:
         index = model.get_obs_index()
     kf = KFold(n_splits=n_splits)

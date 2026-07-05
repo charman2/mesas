@@ -33,6 +33,7 @@ examples/data_with_results.csv
 test/MESASct.py
 .coverage
 *.egg-info/
+.pytest_cache/
 
 # Hypothesis property-testing cache
 .hypothesis/
