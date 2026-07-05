@@ -72,6 +72,10 @@ class ModelOptions:
         If ``True``, record every timestep; if ``False``, record only the
         last; if a string, treat it as a boolean column name in data_df.
         Default False.
+    validate_inputs : bool
+        If ``True`` (default), :meth:`Model.run` first checks the input
+        data for NaN values and negative fluxes and raises a descriptive
+        error. Set to ``False`` to skip the check.
     """
 
     dt: float = 1.0
@@ -87,6 +91,7 @@ class ModelOptions:
     ST_smallest_segment: float = 1.0 / 100
     ST_largest_segment: float = np.inf
     record_state: bool | str = False
+    validate_inputs: bool = True
 
     # Names of all valid option keys (for backward-compat dict validation)
     _VALID_KEYS: frozenset[str] = field(
@@ -105,6 +110,7 @@ class ModelOptions:
                 "ST_smallest_segment",
                 "ST_largest_segment",
                 "record_state",
+                "validate_inputs",
             }
         ),
         init=False,
@@ -113,7 +119,7 @@ class ModelOptions:
 
     @classmethod
     def from_dict(cls, d: dict) -> ModelOptions:
-        """Create from a dict, ignoring unknown keys with a warning."""
+        """Create from a dict, raising ``KeyError`` on unknown keys."""
         valid = {f.name for f in fields(cls) if f.init}
         unknown = set(d) - valid
         if unknown:
@@ -217,6 +223,12 @@ class ModelResult:
         self._data = data
 
     def __getattr__(self, name: str) -> Any:
+        # Guard against infinite recursion during unpickling/copying:
+        # protocol lookups (__setstate__, __deepcopy__, __reduce_ex__, ...)
+        # arrive before _data exists in __dict__, and referencing self._data
+        # here would re-enter __getattr__.
+        if name.startswith("_") or "_data" not in self.__dict__:
+            raise AttributeError(f"No result named '{name}'")
         # Check snake_case aliases first
         if name in self._ALIASES:
             return self._data[self._ALIASES[name]]
@@ -317,11 +329,18 @@ class Model:
         self._options_obj = ModelOptions()
         components_to_learn = kwargs.pop("components_to_learn", None)
         if config and "options" in config:
-            self._options_obj.update({k: v for k, v in config["options"].items() if k in ModelOptions._VALID_KEYS})
-        # Apply any kwargs that are valid options
-        opt_kwargs = {k: v for k, v in kwargs.items() if k in ModelOptions._VALID_KEYS}
-        if opt_kwargs:
-            self._options_obj.update(opt_kwargs)
+            # ModelOptions.update raises KeyError on unknown option names
+            self._options_obj.update(config["options"])
+        # Any remaining kwargs must be valid options — reject typos loudly
+        # rather than silently discarding them (e.g. Model(df, veborse=True))
+        unknown_kwargs = set(kwargs) - ModelOptions._VALID_KEYS
+        if unknown_kwargs:
+            raise TypeError(
+                f"Unknown keyword argument(s) for Model: {sorted(unknown_kwargs)}. "
+                f"Valid options are: {sorted(ModelOptions._VALID_KEYS)}"
+            )
+        if kwargs:
+            self._options_obj.update(kwargs)
         self._apply_options()
         # get the SAS specification
         if config and "sas_specs" in config:
@@ -330,7 +349,7 @@ class Model:
             sas_specs = _processinputs(sas_specs)
         else:
             raise ValueError("No SAS specification found!")
-        self.sas_specs = self.parse_sas_specs(sas_specs)
+        self.sas_specs = sas_specs  # setter parses raw dicts into SAS_Spec objects
         self._numflux = len(self.sas_specs)
         self._fluxorder = list(self.sas_specs.keys())
         # get solute transport parameters
@@ -353,21 +372,38 @@ class Model:
     def _apply_options(self) -> None:
         """Resolve max_age, sT_init, and index_ts from current options."""
         opts = self._options_obj
+        if opts.sT_init is not None:
+            opts.sT_init = np.asarray(opts.sT_init, dtype=float)
+            if opts.max_age is not None and opts.max_age != len(opts.sT_init):
+                raise ValueError(
+                    f"max_age ({opts.max_age}) conflicts with len(sT_init) ({len(opts.sT_init)}). "
+                    "When sT_init is given, max_age is taken from its length; "
+                    "either omit max_age or make them consistent."
+                )
+            opts.max_age = len(opts.sT_init)
         if opts.max_age is None:
             opts.max_age = self._timeseries_length
         if opts.max_age > self._timeseries_length:
             raise ValueError(f"max_age ({opts.max_age}) cannot exceed timeseries_length ({self._timeseries_length})")
         if opts.sT_init is None:
             opts.sT_init = np.zeros(opts.max_age)
-        else:
-            opts.max_age = len(opts.sT_init)
         self._max_age = opts.max_age
         if opts.record_state is False:
             self._index_ts = np.array([self._timeseries_length - 1])
         elif opts.record_state is True:
             self._index_ts = np.arange(self._timeseries_length)
-        else:
+        elif isinstance(opts.record_state, str):
+            if opts.record_state not in self.data_df.columns:
+                raise ValueError(
+                    f"record_state column '{opts.record_state}' not found in data_df. "
+                    f"Available columns: {list(self.data_df.columns)}"
+                )
             self._index_ts = np.where(self.data_df[opts.record_state])[0]
+        else:
+            raise TypeError(
+                f"record_state must be True, False, or the name of a boolean column in data_df, "
+                f"got {opts.record_state!r}"
+            )
 
     def __repr__(self):
         """Creates a repr for the model"""
@@ -378,23 +414,28 @@ class Model:
         return result
 
     def parse_sas_specs(self, sas_specs: dict) -> dict[str, SAS_Spec]:
-        """Validate and convert raw SAS spec dicts into :class:`SAS_Spec` objects."""
+        """Validate and convert raw SAS spec dicts into :class:`SAS_Spec` objects.
+
+        Returns a new dict; the caller's dict is not modified.
+        """
+        parsed: dict[str, SAS_Spec] = {}
         for flux, spec_in in sas_specs.items():
-            spec = deepcopy(spec_in)
             if flux not in self.data_df.columns:
                 raise ValueError(f"Flux '{flux}' not found in data_df columns. Available: {list(self.data_df.columns)}")
-            if isinstance(spec, SAS_Spec):
-                sas_specs[flux] = spec
+            if isinstance(spec_in, SAS_Spec):
+                parsed[flux] = spec_in
             else:
-                if not isinstance(spec, dict):
-                    raise TypeError(f"SAS spec for flux '{flux}' must be a dict or SAS_Spec, got {type(spec).__name__}")
-                for label, component_spec in spec.items():
+                if not isinstance(spec_in, dict):
+                    raise TypeError(
+                        f"SAS spec for flux '{flux}' must be a dict or SAS_Spec, got {type(spec_in).__name__}"
+                    )
+                for label, component_spec in spec_in.items():
                     if not isinstance(component_spec, dict):
                         raise TypeError(
                             f"Component '{label}' of flux '{flux}' must be a dict, got {type(component_spec).__name__}"
                         )
-                sas_specs[flux] = SAS_Spec(spec, self.data_df)
-        return sas_specs
+                parsed[flux] = SAS_Spec(deepcopy(spec_in), self.data_df)
+        return parsed
 
     def copy_without_results(self) -> Model:
         """Return a deep copy of this model with results cleared."""
@@ -470,6 +511,8 @@ class Model:
             self._data_df = pd.read_csv(new_data_df)
         else:
             raise TypeError("data_df must be either a pandas dataframe, or a path to a .csv file")
+        if len(self._data_df) == 0:
+            raise ValueError("data_df is empty — the model needs at least one timestep of input data")
         self._timeseries_length = len(self._data_df)
 
     @property
@@ -497,7 +540,10 @@ class Model:
 
     @sas_specs.setter
     def sas_specs(self, new_sas_specs):
-        self._sas_specs = _processinputs(new_sas_specs)
+        # Parse raw spec dicts into SAS_Spec objects (already-parsed specs
+        # pass through unchanged), so that assigning a raw dict after
+        # construction behaves the same as passing one to the constructor.
+        self._sas_specs = self.parse_sas_specs(_processinputs(new_sas_specs))
         self._numflux = len(self._sas_specs)
         self._fluxorder = list(self._sas_specs.keys())
 
@@ -513,7 +559,18 @@ class Model:
         self._sas_specs[flux].make_spec_ts()
 
     def set_sas_fun(self, flux: str, label: str, sas_fun: Any) -> None:
-        """Replace the SAS function of a named component."""
+        """Replace the SAS function of a named component.
+
+        Parameters
+        ----------
+        flux : str
+            Name of the flux whose SAS spec contains the component.
+        label : str
+            Label of the component to modify.
+        sas_fun : Piecewise, Continuous, or list thereof
+            A single SAS function (applied at every timestep) or a list
+            with one function per timestep.
+        """
         self._sas_specs[flux].components[label].sas_fun = sas_fun
         self._sas_specs[flux].make_spec_ts()
 
@@ -587,6 +644,11 @@ class Model:
             new_solute_parameters = _processinputs(new_solute_parameters)
             self._solute_parameters = {}
             for sol, params in new_solute_parameters.items():
+                if sol not in self.data_df.columns:
+                    raise ValueError(
+                        f"Solute '{sol}' has no matching input concentration column in data_df. "
+                        f"Available columns: {list(self.data_df.columns)}"
+                    )
                 self._solute_parameters[sol] = deepcopy(self._default_parameters)
                 self.set_solute_parameters(sol, params)
             self._numsol = len(self._solute_parameters)
@@ -612,21 +674,25 @@ class Model:
         alpha = np.ones((self._timeseries_length, self._numflux, numsol), dtype=dtype)
         if self.solute_parameters is not None:
 
-            def _get_array(param, N):
-                if param in self.data_df:
-                    return self.data_df[param].values
-                else:
-                    return param * np.ones(N)
+            def _get_array(param, N, name, sol):
+                if isinstance(param, str):
+                    if param in self.data_df:
+                        return self.data_df[param].values
+                    raise ValueError(
+                        f"Column '{param}' given for parameter '{name}' of solute '{sol}' "
+                        f"was not found in data_df. Available columns: {list(self.data_df.columns)}"
+                    )
+                return param * np.ones(N)
 
             for isol, sol in enumerate(self._solorder):
                 C_J[:, isol] = self.data_df[sol].values
                 C_old[isol] = self.solute_parameters[sol]["C_old"]
-                mT_init[:, isol] = _get_array(self.solute_parameters[sol]["mT_init"], self._max_age)
-                k1[:, isol] = _get_array(self.solute_parameters[sol]["k1"], self._timeseries_length)
-                C_eq[:, isol] = _get_array(self.solute_parameters[sol]["C_eq"], self._timeseries_length)
+                mT_init[:, isol] = _get_array(self.solute_parameters[sol]["mT_init"], self._max_age, "mT_init", sol)
+                k1[:, isol] = _get_array(self.solute_parameters[sol]["k1"], self._timeseries_length, "k1", sol)
+                C_eq[:, isol] = _get_array(self.solute_parameters[sol]["C_eq"], self._timeseries_length, "C_eq", sol)
                 for iflux, flux in enumerate(self._fluxorder):
                     alpha[:, iflux, isol] = _get_array(
-                        self.solute_parameters[sol]["alpha"][flux], self._timeseries_length
+                        self.solute_parameters[sol]["alpha"][flux], self._timeseries_length, f"alpha[{flux}]", sol
                     )
         return C_J, mT_init, C_old, alpha, k1, C_eq
 
@@ -661,6 +727,58 @@ class Model:
         weights = np.column_stack([component.weights for component in component_list])
         return SAS_args, P_list, weights, component_type, nC_list, nC_total, nargs_list, nargs_total
 
+    def validate(self) -> None:
+        """Check the input data for common problems and raise if found.
+
+        Checks performed:
+
+        - the influx column and every outflux column exist and contain no
+          NaN values and no negative values
+        - every solute input concentration column contains no NaN values
+
+        NaN in any of these columns propagates silently through the solver
+        and produces NaN (or partially NaN) outputs; negative fluxes are
+        physically meaningless but run without complaint.
+
+        Raises
+        ------
+        ValueError
+            With the offending column name, the number of bad values, and
+            the first offending index. Set the model option
+            ``validate_inputs=False`` to skip this check during ``run()``.
+        """
+        opts = self._options_obj
+
+        def _check(col, allow_negative):
+            if col not in self.data_df.columns:
+                raise ValueError(f"Column '{col}' not found in data_df. Available: {list(self.data_df.columns)}")
+            values = self.data_df[col].values
+            if not np.issubdtype(np.asarray(values).dtype, np.number):
+                raise ValueError(f"Column '{col}' is not numeric (dtype {np.asarray(values).dtype})")
+            isnan = np.isnan(values)
+            if isnan.any():
+                idx = np.where(isnan)[0]
+                raise ValueError(
+                    f"Column '{col}' contains {len(idx)} NaN value(s) (first at index {idx[0]}). "
+                    "Fill or remove them before running, or set validate_inputs=False to skip this check."
+                )
+            if not allow_negative:
+                isneg = values < 0
+                if isneg.any():
+                    idx = np.where(isneg)[0]
+                    raise ValueError(
+                        f"Column '{col}' contains {int(isneg.sum())} negative value(s) "
+                        f"(first at index {idx[0]}: {values[idx[0]]}). Fluxes must be non-negative. "
+                        "Set validate_inputs=False to skip this check."
+                    )
+
+        _check(opts.influx, allow_negative=False)
+        for flux in self._fluxorder:
+            _check(flux, allow_negative=False)
+        for sol in self._solorder:
+            # concentrations may legitimately be negative (e.g. isotope delta values)
+            _check(sol, allow_negative=True)
+
     def run(self) -> None:
         """Execute the SAS model with current parameters.
 
@@ -671,6 +789,9 @@ class Model:
 
         Results are accessible via :attr:`result` and the ``get_*`` methods.
         """
+        # --- 0. Validate inputs (opt out with validate_inputs=False) ---
+        if self._options_obj.validate_inputs:
+            self.validate()
         # --- 1. Extract water flux timeseries ---
         opts = self._options_obj
         J = self.data_df[opts.influx].values  # influx [T]
@@ -697,6 +818,12 @@ class Model:
         debug = opts.debug
         warning = opts.warning
         jacobian = opts.jacobian
+        if jacobian:
+            raise NotImplementedError(
+                "options['jacobian']=True is not implemented in the Numba solver: "
+                "the returned sensitivities would be all zeros. Use numerical "
+                "jacobians instead (e.g. mesas.me.fit_model with jacobian_mode='numerical')."
+            )
         n_substeps = opts.n_substeps
         max_age = opts.max_age
         num_scheme = opts.num_scheme

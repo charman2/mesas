@@ -17,6 +17,12 @@ Or using Conda::
 Either method will install all required dependencies (NumPy, SciPy, pandas,
 Numba, matplotlib).
 
+.. note::
+
+   The releases currently available on PyPI and conda-forge are the older
+   Fortran-based v1.0. Installing from source (see below) gives the newer
+   pure-Python/Numba version, which does not require a compiler.
+
 From source
 ===========
 

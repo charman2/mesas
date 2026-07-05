@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Iterable
+from copy import deepcopy
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -187,9 +188,38 @@ class SAS_Spec:
         for label in self._comp2learn_componentorder:
             component = self.components[label]
             nparams = len(component.sas_fun[0].parameter_list)
-            component.sas_fun[0].parameter_list = parameter_list[starti : starti + nparams]
+            new_params = parameter_list[starti : starti + nparams]
+            # Propagate to every per-timestep SAS function: the solver reads
+            # all timesteps via Component.argsS, so updating only element 0
+            # would leave the calibrated parameters applied at t=0 alone.
+            for fun in component._sas_funs:
+                fun.parameter_list = np.array(new_params)
             starti += nparams
         self.make_spec_ts()
+
+    def subdivided_copy(self, label: str, segment: int, **kwargs: Any) -> SAS_Spec:
+        """Return a copy with one component's piecewise segment split in two.
+
+        Parameters
+        ----------
+        label : str
+            Which component's SAS function to subdivide.
+        segment : int
+            Which segment to subdivide (numbered from 0 for the youngest).
+        **kwargs
+            Forwarded to the SAS function's ``subdivided_copy`` method
+            (e.g. ``split_frac``).
+
+        Returns
+        -------
+        SAS_Spec
+            A new spec with the subdivided component; interpolators rebuilt.
+        """
+        new_spec = deepcopy(self)
+        component = new_spec.components[label]
+        component.sas_fun = [fun.subdivided_copy(segment, **kwargs) for fun in component._sas_funs]
+        new_spec.make_spec_ts()
+        return new_spec
 
     def plot(self, ax: Axes | None = None, **kwargs: Any) -> dict[str, Any]:
         """Plot the SAS function for each component.
@@ -382,6 +412,20 @@ class Component:
         """List of per-timestep SAS function objects."""
         return [sas_fun for sas_fun in self._sas_funs]
 
+    @sas_fun.setter
+    def sas_fun(self, new_sas_fun: Continuous | Piecewise | list) -> None:
+        if isinstance(new_sas_fun, (list, tuple)):
+            if len(new_sas_fun) != self.N:
+                raise ValueError(
+                    f"Component '{self.label}': expected {self.N} SAS functions (one per timestep), "
+                    f"got {len(new_sas_fun)}"
+                )
+            self._sas_funs = list(new_sas_fun)
+        else:
+            # A single function applies at every timestep. Each timestep gets
+            # its own copy because parameter updates mutate them individually.
+            self._sas_funs = [deepcopy(new_sas_fun) for _ in range(self.N)]
+
     def __getitem__(self, i: int) -> Continuous | Piecewise:
         """Return the SAS function for timestep *i*."""
         return self._sas_funs[i]
@@ -392,13 +436,15 @@ class Component:
         result += self._spec.__repr__()
         return result
 
-    def plot(self, *args: Any, **kwargs: Any) -> Any:
-        """Plot the component's SAS function.
+    def plot(self, *args: Any, i: int = 0, **kwargs: Any) -> Any:
+        """Plot the component's SAS function at one timestep.
 
         Parameters
         ----------
         *args
             Positional arguments forwarded to the SAS function's ``plot``.
+        i : int, optional
+            Timestep index of the SAS function to plot. Default 0.
         **kwargs
             Keyword arguments forwarded to the SAS function's ``plot``.
             The component ``label`` is automatically included.
@@ -408,7 +454,7 @@ class Component:
         Any
             Return value from the underlying SAS function's ``plot`` method.
         """
-        return self.sas_fun.plot(*args, label=self.label, **kwargs)
+        return self._sas_funs[i].plot(*args, label=self.label, **kwargs)
 
 
 class _NoneList:

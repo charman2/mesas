@@ -72,15 +72,16 @@ supports both dict-style and attribute-style access:
     wb = model.result.water_balance
     sb = model.result.solute_balance
 
-Available keys: ``sT``, ``pQ``, ``water_balance``, ``dsTdSj``,
-``C_Q``, ``mT``, ``mQ``, ``mR``, ``solute_balance``, ``dmTdSj``,
-``dCdSj``.
+Available keys: ``sT``, ``pQ``, ``water_balance``, ``dsTdSj``, plus
+``C_Q``, ``mT``, ``mQ``, ``mR``, ``solute_balance``, ``dmTdSj`` and
+``dCdSj`` when at least one solute is configured.
 
 .. note::
 
     The camelCase names ``WaterBalance`` and ``SoluteBalance`` are
-    deprecated and will emit a warning. Use ``water_balance`` and
-    ``solute_balance`` instead.
+    deprecated. They still work, but dict-style access (e.g.
+    ``model.result["WaterBalance"]``) emits a ``DeprecationWarning``.
+    Use ``water_balance`` and ``solute_balance`` instead.
 
 Array ordering
 ==============

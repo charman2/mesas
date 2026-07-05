@@ -1,10 +1,10 @@
 [build-system]
-requires = ["meson-python>=0.15", "meson>=1.1.0"]
-build-backend = "mesonpy"
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
 
 [project]
 name = "mesas"
-version = "v1.20230427"
+version = "1.2026.0a1"
 description = "MESAS - Multiscale Estimation of StorAge Selection."
 readme = "README.md"
 authors = [
@@ -31,6 +31,7 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Physics",
 ]
 requires-python = ">=3.10"
@@ -43,6 +44,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# scikit-learn is needed only by mesas.me.recursive_split (SAS function estimation)
+estimation = [
+  "scikit-learn",
+]
 docs = [
   "sphinx>=7.0",
   "sphinx-rtd-theme>=2.0",
@@ -59,6 +64,23 @@ test = [
 homepage = "https://mesas.readthedocs.io/"
 documentation = "https://mesas.readthedocs.io/"
 repository = "https://github.com/charman2/mesas"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mesas"]
+exclude = ["mesas/dev"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "mesas",
+  "test",
+  "doc",
+  "examples/*.py",
+  "examples/*.csv",
+  "LICENSE.txt",
+  "README.md",
+  "CITATION.cff",
+]
+exclude = ["mesas/dev"]
 
 
 [tool.pytest.ini_options]
@@ -79,3 +101,14 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Cell-based (# %%) tutorial scripts introduce imports as the narrative needs them.
+"examples/*.py" = ["E402"]
+# Legacy benchmark scripts predating the refactor; lint-exempt until
+# they are consolidated into the curated test suites.
+"test/test_time.py" = ["W191", "F811", "F821", "F841", "E741"]
+"test/test_time2.py" = ["W191", "F811", "F821", "F841", "E741"]
+"test/test_benchmark.py" = ["W191", "F811", "F821", "F841", "E741"]
+"test/test_benchmark2.py" = ["W191", "F811", "F821", "F841", "E741"]
+"test/test_evapoconcentration.py" = ["W191", "F811", "F821", "F841", "E741"]

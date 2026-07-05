@@ -13,6 +13,7 @@ return values as the Fortran ``solvesas`` subroutine (via f2py).
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 
@@ -47,6 +48,21 @@ def _maybe_jit_fastmath(func):
     """Apply @njit(fastmath=True) for hot numerical loops."""
     if _USE_NUMBA:
         return njit(cache=True, fastmath=True)(func)
+    return func
+
+
+def _maybe_jit_parallel(func):
+    """Apply @njit(parallel=True, fastmath=True) for prange loops.
+
+    Set the environment variable ``MESAS_PARALLEL=0`` (before import) to
+    compile the hot loop serially instead — useful when parallelising at
+    the process level (e.g. multiprocessing calibration), where oversubscribing
+    cores with numba threads hurts throughput. Thread count can also be
+    limited with ``NUMBA_NUM_THREADS``.
+    """
+    if _USE_NUMBA:
+        parallel = os.environ.get("MESAS_PARALLEL", "1") != "0"
+        return njit(cache=True, fastmath=True, parallel=parallel)(func)
     return func
 
 
@@ -270,36 +286,67 @@ def _gamma_cdf(ST, loc, scale, a):
 # ---------------------------------------------------------------------------
 
 _GAMMA_TABLE_SIZE = 20000
-_GAMMA_TABLE_XMAX = 40.0  # gammainc(a, 40) ≈ 1.0 for all practical a
-_GAMMA_TABLE_DX = _GAMMA_TABLE_XMAX / _GAMMA_TABLE_SIZE
+
+
+@_maybe_jit
+def _gamma_table_meta_for_shape(a):
+    """Compute (x_max, dy, a_exp) lookup-table metadata for shape ``a``.
+
+    The table domain [0, x_max] must cover the CDF up to where it is
+    indistinguishable from 1: gammainc(a, a + 12*sqrt(a) + 40) < 1e-12 from
+    1 for all a, so beyond x_max the lookup may safely return 1.0.
+
+    The table is uniform in the transformed variable y = x**a_exp with
+    a_exp = min(a/2, 1). Near x = 0 the CDF behaves like x**a, i.e. like
+    y**2 in the transformed variable, so linear interpolation stays accurate
+    even for a < 1 where the gamma pdf has an integrable singularity at 0
+    that a uniform-in-x grid cannot resolve.
+    """
+    x_max = a + 12.0 * np.sqrt(a) + 40.0
+    a_exp = min(a / 2.0, 1.0)
+    y_max = x_max**a_exp
+    dy = y_max / _GAMMA_TABLE_SIZE
+    return x_max, dy, a_exp
 
 
 @_maybe_jit
 def _build_gamma_table(a):
-    """Build lookup table for gammainc(a, x) on [0, x_max].
+    """Build lookup table for gammainc(a, x), uniform in y = x**a_exp.
 
     Returns a 1D array of size ``_GAMMA_TABLE_SIZE + 1`` containing
-    gammainc(a, x) at evenly spaced x values.
+    gammainc(a, x) at the grid points x = (i*dy)**(1/a_exp), where
+    (x_max, dy, a_exp) come from :func:`_gamma_table_meta_for_shape`.
     """
+    x_max, dy, a_exp = _gamma_table_meta_for_shape(a)
+    inv_a_exp = 1.0 / a_exp
     table = np.empty(_GAMMA_TABLE_SIZE + 1)
-    dx = _GAMMA_TABLE_DX
-    for i in range(_GAMMA_TABLE_SIZE + 1):
-        table[i] = _gammad(i * dx, a)
+    table[0] = 0.0
+    for i in range(1, _GAMMA_TABLE_SIZE + 1):
+        x = (i * dy) ** inv_a_exp
+        table[i] = _gammad(x, a)
     return table
 
 
 @_maybe_jit_inline
-def _gamma_cdf_table(ST, loc, scale, table):
-    """Gamma CDF via precomputed lookup table + linear interpolation."""
+def _gamma_cdf_table(ST, loc, scale, table, x_max, dy, a_exp):
+    """Gamma CDF via precomputed lookup table + linear interpolation.
+
+    The table is uniform in y = x**a_exp (see _build_gamma_table).
+    """
     if ST <= loc:
         return 0.0
     x = (ST - loc) / scale
-    if x >= _GAMMA_TABLE_XMAX:
+    if x >= x_max:
         return 1.0
-    # Linear interpolation in table
-    fx = x / _GAMMA_TABLE_DX
-    i = int(fx)
-    frac = fx - i
+    if a_exp == 1.0:
+        y = x
+    else:
+        y = x**a_exp
+    fy = y / dy
+    i = int(fy)
+    if i >= _GAMMA_TABLE_SIZE:
+        return table[_GAMMA_TABLE_SIZE]
+    frac = fy - i
     return table[i] + frac * (table[i + 1] - table[i])
 
 
@@ -416,6 +463,8 @@ def _solve_core(
     # back to direct evaluation via _gammad.
     gamma_tables = np.zeros((numcomponent_total, _GAMMA_TABLE_SIZE + 1))
     gamma_use_table = np.zeros(numcomponent_total, dtype=np.int64)
+    # Per-component table metadata: columns are (x_max, dy, a_exp)
+    gamma_table_meta = np.zeros((numcomponent_total, 3))
     for ic in range(numcomponent_total):
         if component_type[ic] == 1:
             ai = int(args_index_list[ic])
@@ -428,6 +477,10 @@ def _solve_core(
                     break
             if a_is_constant:
                 gamma_tables[ic, :] = _build_gamma_table(a_shape)
+                x_max, dy, a_exp = _gamma_table_meta_for_shape(a_shape)
+                gamma_table_meta[ic, 0] = x_max
+                gamma_table_meta[ic, 1] = dy
+                gamma_table_meta[ic, 2] = a_exp
                 gamma_use_table[ic] = 1
 
     # Allocate output arrays
@@ -455,7 +508,6 @@ def _solve_core(
     mR_temp = np.zeros((total_num_substeps, numsol))
     mR_aver = np.zeros((total_num_substeps, numsol))
     sT_start = np.zeros(total_num_substeps)
-    sT_temp = np.zeros(total_num_substeps)
     mT_start = np.zeros((total_num_substeps, numsol))
     mT_temp = np.zeros((total_num_substeps, numsol))
     jt_fullstep_at = np.zeros(total_num_substeps, dtype=np.int64)
@@ -468,7 +520,40 @@ def _solve_core(
         for t in range(max_age):
             mT_outputstep[0, s, t] = mT_init_fullstep[t, s]
 
+    # Unified RK stage tables: stagefrac[rk] is the evaluation fraction of
+    # stage rk; stagefrac[rk+1] is the propagation fraction to the next stage
+    # state (the last entry, 1.0, is the final full-step update from averages).
+    if num_scheme == 1:
+        nstage = 1
+        stagefrac = np.array([0.0, 1.0])
+        rk_coeffs = np.array([1.0])
+    elif num_scheme == 2:
+        nstage = 2
+        stagefrac = rk2_stepfraction
+        rk_coeffs = rk2_coeff
+    else:
+        nstage = 4
+        stagefrac = rk4_stepfraction
+        rk_coeffs = rk4_coeff
+
     iT_prev_fullstep = -1
+
+    # If the initial age-ranked storage (and mass) are identically zero, then
+    # at age step iT the trailing iT characteristics (the "wrapped" slots that
+    # carry initial-condition water) are identically zero: their sT, mT, pQ,
+    # mQ, mR are all zero and contribute nothing. We can restrict the hot
+    # loops to the active front [0, total_num_substeps - iT_substep).
+    zero_init = True
+    for t in range(max_age):
+        if sT_init_fullstep[t] != 0.0:
+            zero_init = False
+            break
+        for s in range(numsol):
+            if mT_init_fullstep[t, s] != 0.0:
+                zero_init = False
+                break
+        if not zero_init:
+            break
 
     # =========================================================================
     # MAIN LOOP: iterate over water age (outer) and substeps (inner)
@@ -477,15 +562,21 @@ def _solve_core(
         for substep in range(n_substeps):
             iT_substep = iT_fullstep * n_substeps + substep
 
+            if zero_init:
+                n_active = total_num_substeps - iT_substep
+            else:
+                n_active = total_num_substeps
+
             # Map each characteristic to its current full timestep
-            for c in range(total_num_substeps):
+            for c in range(n_active):
                 jt_sub = (c + iT_substep) % total_num_substeps
                 jt_substep_at[c] = jt_sub
                 jt_is_which_substep = jt_sub % n_substeps
                 jt_fullstep_at[c] = (jt_sub - jt_is_which_substep) // n_substeps
 
-            # Reset RK averages
-            for c in range(total_num_substeps):
+            # Reset RK averages (n_active slots plus the just-retired slot)
+            n_reset = min(n_active + 1, total_num_substeps)
+            for c in range(n_reset):
                 for iq in range(numflux):
                     pQ_aver[c, iq] = 0.0
                     for s in range(numsol):
@@ -500,266 +591,51 @@ def _solve_core(
                 for s in range(numsol):
                     mT_start[idx, s] = mT_init_fullstep[iT_prev_fullstep, s]
 
-            # Copy start to temp
-            for c in range(total_num_substeps):
-                sT_temp[c] = sT_start[c]
-                for s in range(numsol):
-                    mT_temp[c, s] = mT_start[c, s]
-
-            # ---- Runge-Kutta integration ----
-            if num_scheme == 1:
-                # Forward Euler
-                _get_flux(
-                    sT_temp,
-                    mT_temp,
-                    pQ_temp,
-                    mQ_temp,
-                    mR_temp,
-                    0.0,
-                    iT_substep,
-                    total_num_substeps,
-                    n_substeps,
-                    dt_substep,
-                    jt_fullstep_at,
-                    jt_substep_at,
-                    STcum_topbot_start,
-                    sT_init_fullstep,
-                    Q_fullstep,
-                    alpha_fullstep,
-                    k1_fullstep,
-                    C_eq_fullstep,
-                    weights_fullstep,
-                    SAS_args,
-                    P_list,
-                    grad_precalc,
-                    component_type,
-                    component_index_list,
-                    args_index_list,
-                    numargs_list,
-                    numflux,
-                    numsol,
-                    numcomponent_total,
-                    timeseries_length,
-                    gamma_tables,
-                    gamma_use_table,
-                )
-                _add_to_average(
-                    pQ_aver, mQ_aver, mR_aver, pQ_temp, mQ_temp, mR_temp, 1.0, total_num_substeps, numflux, numsol
-                )
-                _new_state(
-                    sT_temp,
-                    mT_temp,
-                    sT_start,
-                    mT_start,
-                    pQ_aver,
-                    mQ_aver,
-                    mR_aver,
-                    1.0,
-                    iT_substep,
-                    dt_substep,
-                    jt_fullstep_at,
-                    J_fullstep,
-                    C_J_fullstep,
-                    Q_fullstep,
-                    total_num_substeps,
-                    numflux,
-                    numsol,
-                )
-
-            elif num_scheme == 2:
-                # RK2
-                for rk in range(2):
-                    sf = rk2_stepfraction[rk]
-                    _get_flux(
-                        sT_temp,
-                        mT_temp,
-                        pQ_temp,
-                        mQ_temp,
-                        mR_temp,
-                        sf,
-                        iT_substep,
-                        total_num_substeps,
-                        n_substeps,
-                        dt_substep,
-                        jt_fullstep_at,
-                        jt_substep_at,
-                        STcum_topbot_start,
-                        sT_init_fullstep,
-                        Q_fullstep,
-                        alpha_fullstep,
-                        k1_fullstep,
-                        C_eq_fullstep,
-                        weights_fullstep,
-                        SAS_args,
-                        P_list,
-                        grad_precalc,
-                        component_type,
-                        component_index_list,
-                        args_index_list,
-                        numargs_list,
-                        numflux,
-                        numsol,
-                        numcomponent_total,
-                        timeseries_length,
-                        gamma_tables,
-                        gamma_use_table,
-                    )
-                    _add_to_average(
-                        pQ_aver,
-                        mQ_aver,
-                        mR_aver,
-                        pQ_temp,
-                        mQ_temp,
-                        mR_temp,
-                        rk2_coeff[rk],
-                        total_num_substeps,
-                        numflux,
-                        numsol,
-                    )
-                    if rk < 1:
-                        sf_next = rk2_stepfraction[rk + 1]
-                        _new_state(
-                            sT_temp,
-                            mT_temp,
-                            sT_start,
-                            mT_start,
-                            pQ_temp,
-                            mQ_temp,
-                            mR_temp,
-                            sf_next,
-                            iT_substep,
-                            dt_substep,
-                            jt_fullstep_at,
-                            J_fullstep,
-                            C_J_fullstep,
-                            Q_fullstep,
-                            total_num_substeps,
-                            numflux,
-                            numsol,
-                        )
-                # Final state update
-                _new_state(
-                    sT_temp,
-                    mT_temp,
-                    sT_start,
-                    mT_start,
-                    pQ_aver,
-                    mQ_aver,
-                    mR_aver,
-                    rk2_stepfraction[2],
-                    iT_substep,
-                    dt_substep,
-                    jt_fullstep_at,
-                    J_fullstep,
-                    C_J_fullstep,
-                    Q_fullstep,
-                    total_num_substeps,
-                    numflux,
-                    numsol,
-                )
-
-            elif num_scheme == 4:
-                # RK4
-                for rk in range(4):
-                    sf = rk4_stepfraction[rk]
-                    _get_flux(
-                        sT_temp,
-                        mT_temp,
-                        pQ_temp,
-                        mQ_temp,
-                        mR_temp,
-                        sf,
-                        iT_substep,
-                        total_num_substeps,
-                        n_substeps,
-                        dt_substep,
-                        jt_fullstep_at,
-                        jt_substep_at,
-                        STcum_topbot_start,
-                        sT_init_fullstep,
-                        Q_fullstep,
-                        alpha_fullstep,
-                        k1_fullstep,
-                        C_eq_fullstep,
-                        weights_fullstep,
-                        SAS_args,
-                        P_list,
-                        grad_precalc,
-                        component_type,
-                        component_index_list,
-                        args_index_list,
-                        numargs_list,
-                        numflux,
-                        numsol,
-                        numcomponent_total,
-                        timeseries_length,
-                        gamma_tables,
-                        gamma_use_table,
-                    )
-                    _add_to_average(
-                        pQ_aver,
-                        mQ_aver,
-                        mR_aver,
-                        pQ_temp,
-                        mQ_temp,
-                        mR_temp,
-                        rk4_coeff[rk],
-                        total_num_substeps,
-                        numflux,
-                        numsol,
-                    )
-                    if rk < 3:
-                        sf_next = rk4_stepfraction[rk + 1]
-                        _new_state(
-                            sT_temp,
-                            mT_temp,
-                            sT_start,
-                            mT_start,
-                            pQ_temp,
-                            mQ_temp,
-                            mR_temp,
-                            sf_next,
-                            iT_substep,
-                            dt_substep,
-                            jt_fullstep_at,
-                            J_fullstep,
-                            C_J_fullstep,
-                            Q_fullstep,
-                            total_num_substeps,
-                            numflux,
-                            numsol,
-                        )
-                # Final state update
-                _new_state(
-                    sT_temp,
-                    mT_temp,
-                    sT_start,
-                    mT_start,
-                    pQ_aver,
-                    mQ_aver,
-                    mR_aver,
-                    rk4_stepfraction[4],
-                    iT_substep,
-                    dt_substep,
-                    jt_fullstep_at,
-                    J_fullstep,
-                    C_J_fullstep,
-                    Q_fullstep,
-                    total_num_substeps,
-                    numflux,
-                    numsol,
-                )
-
-            # Commit RK result
-            for c in range(total_num_substeps):
-                sT_start[c] = sT_temp[c]
-                for s in range(numsol):
-                    mT_start[c, s] = mT_temp[c, s]
+            # ---- Fused Runge-Kutta integration over characteristics ----
+            _rk_substep_fused(
+                sT_start,
+                mT_start,
+                mT_temp,
+                pQ_temp,
+                mQ_temp,
+                mR_temp,
+                pQ_aver,
+                mQ_aver,
+                mR_aver,
+                stagefrac,
+                rk_coeffs,
+                nstage,
+                iT_substep,
+                n_active,
+                dt_substep,
+                jt_fullstep_at,
+                jt_substep_at,
+                STcum_topbot_start,
+                Q_fullstep,
+                alpha_fullstep,
+                k1_fullstep,
+                C_eq_fullstep,
+                J_fullstep,
+                C_J_fullstep,
+                weights_fullstep,
+                SAS_args,
+                P_list,
+                grad_precalc,
+                component_type,
+                component_index_list,
+                args_index_list,
+                numargs_list,
+                numflux,
+                numsol,
+                gamma_tables,
+                gamma_use_table,
+                gamma_table_meta,
+            )
 
             # Update cumulative storage along characteristics
             for c in range(total_num_substeps + 1):
                 STcum_topbot_start[c, 0] = STcum_topbot_start[c, 1]
-            for c in range(total_num_substeps):
+            for c in range(n_active):
                 jt_c = jt_substep_at[c]
                 if jt_c < total_num_substeps:
                     STcum_topbot_start[jt_c + 1, 1] = STcum_topbot_start[jt_c + 1, 0] + sT_start[c] * dt_substep
@@ -771,6 +647,7 @@ def _solve_core(
                 iT_substep,
                 substep,
                 total_num_substeps,
+                n_active,
                 n_substeps,
                 dt_substep,
                 dt,
@@ -850,315 +727,181 @@ def _solve_core(
     )
 
 
-@_maybe_jit_fastmath
-def _get_flux(
-    sT,
-    mT,
-    pQ,
-    mQ,
-    mR,
-    stepfraction,
+@_maybe_jit_parallel
+def _rk_substep_fused(
+    sT_start,
+    mT_start,
+    mT_temp,
+    pQ_temp,
+    mQ_temp,
+    mR_temp,
+    pQ_aver,
+    mQ_aver,
+    mR_aver,
+    stagefrac,
+    rk_coeffs,
+    nstage,
     iT_substep,
-    total_num_substeps,
-    n_substeps,
+    n_active,
     dt_substep,
     jt_fullstep_at,
     jt_substep_at,
     STcum_topbot_start,
-    sT_init_fullstep,
     Q_fullstep,
     alpha_fullstep,
     k1_fullstep,
     C_eq_fullstep,
-    weights_fullstep,
-    SAS_args,
-    P_list,
-    grad_precalc,
-    component_type,
-    component_index_list,
-    args_index_list,
-    numargs_list,
-    numflux,
-    numsol,
-    numcomponent_total,
-    timeseries_length,
-    gamma_tables,
-    gamma_use_table,
-):
-    """Compute fluxes from current state using SAS functions."""
-
-    # Calculate pQ (transit time distribution)
-    _calculate_pQ(
-        sT,
-        pQ,
-        stepfraction,
-        iT_substep,
-        total_num_substeps,
-        n_substeps,
-        dt_substep,
-        jt_fullstep_at,
-        jt_substep_at,
-        STcum_topbot_start,
-        sT_init_fullstep,
-        weights_fullstep,
-        SAS_args,
-        P_list,
-        grad_precalc,
-        component_type,
-        component_index_list,
-        args_index_list,
-        numargs_list,
-        numflux,
-        numcomponent_total,
-        timeseries_length,
-        gamma_tables,
-        gamma_use_table,
-    )
-
-    # Solute mass flux: mQ = mT * alpha * Q * pQ / sT (well-mixed)
-    for c in range(total_num_substeps):
-        for iq in range(numflux):
-            for s in range(numsol):
-                mQ[c, iq, s] = 0.0
-    for s in range(numsol):
-        for iq in range(numflux):
-            for c in range(total_num_substeps):
-                if sT[c] > 0.0:
-                    jt_c = jt_fullstep_at[c]
-                    mQ[c, iq, s] = mT[c, s] * alpha_fullstep[jt_c, iq, s] * Q_fullstep[jt_c, iq] * pQ[c, iq] / sT[c]
-
-    # Reaction mass: mR = k1 * (C_eq * sT - mT)
-    for s in range(numsol):
-        for c in range(total_num_substeps):
-            jt_c = jt_fullstep_at[c]
-            if k1_fullstep[jt_c, s] > 0.0:
-                mR[c, s] = k1_fullstep[jt_c, s] * (C_eq_fullstep[jt_c, s] * sT[c] - mT[c, s])
-            else:
-                mR[c, s] = 0.0
-
-
-@_maybe_jit_fastmath
-def _calculate_pQ(
-    sT,
-    pQ,
-    stepfraction,
-    iT_substep,
-    total_num_substeps,
-    n_substeps,
-    dt_substep,
-    jt_fullstep_at,
-    jt_substep_at,
-    STcum_topbot_start,
-    sT_init_fullstep,
-    weights_fullstep,
-    SAS_args,
-    P_list,
-    grad_precalc,
-    component_type,
-    component_index_list,
-    args_index_list,
-    numargs_list,
-    numflux,
-    numcomponent_total,
-    timeseries_length,
-    gamma_tables,
-    gamma_use_table,
-):
-    """Evaluate SAS functions to compute pQ (transit time distribution).
-
-    The inner characteristic loop uses ``prange`` for parallel execution
-    across CPU cores (mirrors Fortran's ``do concurrent``).
-    """
-
-    if iT_substep == 0 and stepfraction == 0.0:
-        for c in range(total_num_substeps):
-            for iq in range(numflux):
-                pQ[c, iq] = 0.0
-        return
-
-    # Compute STcum at top and bottom of each age bin
-    STcum_top = np.zeros(total_num_substeps)
-    STcum_bot = np.zeros(total_num_substeps)
-
-    if iT_substep == 0:
-        # All tops are zero
-        pass
-    else:
-        for c in range(total_num_substeps):
-            jt_sub = jt_substep_at[c]
-            STcum_top[c] = (
-                STcum_topbot_start[jt_sub, 0] * (1.0 - stepfraction) + STcum_topbot_start[jt_sub + 1, 1] * stepfraction
-            )
-
-    for c in range(total_num_substeps):
-        STcum_bot[c] = STcum_top[c] + sT[c] * dt_substep
-
-    # Evaluate SAS functions at top and bottom.
-    # Each component type is handled in a separate pass with prange
-    # to maximize parallel efficiency.
-    PQcum_top = np.zeros((total_num_substeps, numflux))
-    PQcum_bot = np.zeros((total_num_substeps, numflux))
-
-    for iq in range(numflux):
-        for ic in range(int(component_index_list[iq]), int(component_index_list[iq + 1])):
-            ctype = int(component_type[ic])
-            ai = int(args_index_list[ic])
-            nargs = int(numargs_list[ic])
-
-            for c in range(total_num_substeps):
-                if sT[c] <= 0.0 and ctype != -1:
-                    continue
-                jt_c = int(jt_fullstep_at[c])
-                w = float(weights_fullstep[jt_c, ic])
-
-                # Evaluate at top
-                ST_val = STcum_top[c]
-                if ctype == -1:
-                    p_top = _piecewise_linear_cdf(ST_val, SAS_args, P_list, grad_precalc, ai, jt_c, nargs)
-                elif ctype == 1:
-                    if gamma_use_table[ic]:
-                        p_top = _gamma_cdf_table(
-                            ST_val, float(SAS_args[ai, jt_c]), float(SAS_args[ai + 1, jt_c]), gamma_tables[ic]
-                        )
-                    else:
-                        p_top = _gamma_cdf(
-                            ST_val,
-                            float(SAS_args[ai, jt_c]),
-                            float(SAS_args[ai + 1, jt_c]),
-                            float(SAS_args[ai + 2, jt_c]),
-                        )
-                elif ctype == 2:
-                    p_top = _beta_cdf(
-                        ST_val,
-                        float(SAS_args[ai, jt_c]),
-                        float(SAS_args[ai + 1, jt_c]),
-                        float(SAS_args[ai + 2, jt_c]),
-                        float(SAS_args[ai + 3, jt_c]),
-                    )
-                elif ctype == 3:
-                    p_top = _kumaraswamy_cdf(
-                        ST_val,
-                        float(SAS_args[ai, jt_c]),
-                        float(SAS_args[ai + 1, jt_c]),
-                        float(SAS_args[ai + 2, jt_c]),
-                        float(SAS_args[ai + 3, jt_c]),
-                    )
-                else:
-                    p_top = 0.0
-
-                PQcum_top[c, iq] += w * p_top
-
-                # Evaluate at bottom
-                ST_val = STcum_bot[c]
-                if ctype == -1:
-                    p_bot = _piecewise_linear_cdf(ST_val, SAS_args, P_list, grad_precalc, ai, jt_c, nargs)
-                elif ctype == 1:
-                    if gamma_use_table[ic]:
-                        p_bot = _gamma_cdf_table(
-                            ST_val, float(SAS_args[ai, jt_c]), float(SAS_args[ai + 1, jt_c]), gamma_tables[ic]
-                        )
-                    else:
-                        p_bot = _gamma_cdf(
-                            ST_val,
-                            float(SAS_args[ai, jt_c]),
-                            float(SAS_args[ai + 1, jt_c]),
-                            float(SAS_args[ai + 2, jt_c]),
-                        )
-                elif ctype == 2:
-                    p_bot = _beta_cdf(
-                        ST_val,
-                        float(SAS_args[ai, jt_c]),
-                        float(SAS_args[ai + 1, jt_c]),
-                        float(SAS_args[ai + 2, jt_c]),
-                        float(SAS_args[ai + 3, jt_c]),
-                    )
-                elif ctype == 3:
-                    p_bot = _kumaraswamy_cdf(
-                        ST_val,
-                        float(SAS_args[ai, jt_c]),
-                        float(SAS_args[ai + 1, jt_c]),
-                        float(SAS_args[ai + 2, jt_c]),
-                        float(SAS_args[ai + 3, jt_c]),
-                    )
-                else:
-                    p_bot = 0.0
-
-                PQcum_bot[c, iq] += w * p_bot
-
-    # pQ = (PQcum_bottom - PQcum_top) / dt_substep
-    for c in range(total_num_substeps):
-        for iq in range(numflux):
-            if sT[c] == 0.0:
-                pQ[c, iq] = 0.0
-            else:
-                pQ[c, iq] = (PQcum_bot[c, iq] - PQcum_top[c, iq]) / dt_substep
-
-
-@_maybe_jit
-def _add_to_average(pQ_aver, mQ_aver, mR_aver, pQ, mQ, mR, coeff, total_num_substeps, numflux, numsol):
-    """Accumulate RK-weighted flux estimates into running average."""
-    for c in range(total_num_substeps):
-        for iq in range(numflux):
-            pQ_aver[c, iq] += coeff * pQ[c, iq]
-            for s in range(numsol):
-                mQ_aver[c, iq, s] += coeff * mQ[c, iq, s]
-        for s in range(numsol):
-            mR_aver[c, s] += coeff * mR[c, s]
-
-
-@_maybe_jit
-def _new_state(
-    sT,
-    mT,
-    sT_start,
-    mT_start,
-    pQ,
-    mQ,
-    mR,
-    stepfraction,
-    iT_substep,
-    dt_substep,
-    jt_fullstep_at,
     J_fullstep,
     C_J_fullstep,
-    Q_fullstep,
-    total_num_substeps,
+    weights_fullstep,
+    SAS_args,
+    P_list,
+    grad_precalc,
+    component_type,
+    component_index_list,
+    args_index_list,
+    numargs_list,
     numflux,
     numsol,
+    gamma_tables,
+    gamma_use_table,
+    gamma_table_meta,
 ):
-    """Advance state by one RK sub-stage."""
-    dt_num = dt_substep * stepfraction
+    """Fused RK substep: all stages for each characteristic in one sweep.
 
-    for c in range(total_num_substeps):
-        sT[c] = sT_start[c]
-        for s in range(numsol):
-            mT[c, s] = mT_start[c, s] + mR[c, s] * dt_num
-
-    # Influx at age 0
-    if iT_substep == 0:
-        for c in range(total_num_substeps):
-            jt_c = jt_fullstep_at[c]
-            sT[c] += J_fullstep[jt_c] * stepfraction
-            for s in range(numsol):
-                mT[c, s] += J_fullstep[jt_c] * C_J_fullstep[jt_c, s] * stepfraction
-
-    # Outflux
-    for c in range(total_num_substeps):
+    Characteristics are independent within a substep (STcum_topbot_start is
+    frozen), so the c loop is embarrassingly parallel.
+    """
+    for c in prange(n_active):
+        jt_sub = jt_substep_at[c]
         jt_c = jt_fullstep_at[c]
-        total_Q_pQ = 0.0
-        for iq in range(numflux):
-            total_Q_pQ += Q_fullstep[jt_c, iq] * pQ[c, iq]
-        sT[c] -= total_Q_pQ * dt_num
-        if sT[c] < 0.0:
-            sT[c] = 0.0
-
-    # Solute outflux
-    for c in range(total_num_substeps):
+        top0 = STcum_topbot_start[jt_sub, 0]
+        top1 = STcum_topbot_start[jt_sub + 1, 1]
+        sT_c = sT_start[c]
         for s in range(numsol):
-            total_mQ = 0.0
+            mT_temp[c, s] = mT_start[c, s]
+
+        for rk in range(nstage):
+            sf = stagefrac[rk]
+
+            # ---- pQ from SAS functions at current stage state ----
+            if sT_c > 0.0 and not (iT_substep == 0 and sf == 0.0):
+                if iT_substep == 0:
+                    top = 0.0
+                else:
+                    top = top0 * (1.0 - sf) + top1 * sf
+                bot = top + sT_c * dt_substep
+                for iq in range(numflux):
+                    PQt = 0.0
+                    PQb = 0.0
+                    for ic in range(int(component_index_list[iq]), int(component_index_list[iq + 1])):
+                        ctype = int(component_type[ic])
+                        ai = int(args_index_list[ic])
+                        nargs = int(numargs_list[ic])
+                        w = float(weights_fullstep[jt_c, ic])
+                        if ctype == -1:
+                            PQt += w * _piecewise_linear_cdf(top, SAS_args, P_list, grad_precalc, ai, jt_c, nargs)
+                            PQb += w * _piecewise_linear_cdf(bot, SAS_args, P_list, grad_precalc, ai, jt_c, nargs)
+                        elif ctype == 1:
+                            loc = float(SAS_args[ai, jt_c])
+                            scale = float(SAS_args[ai + 1, jt_c])
+                            if gamma_use_table[ic]:
+                                g_xmax = gamma_table_meta[ic, 0]
+                                g_dy = gamma_table_meta[ic, 1]
+                                g_aexp = gamma_table_meta[ic, 2]
+                                PQt += w * _gamma_cdf_table(top, loc, scale, gamma_tables[ic], g_xmax, g_dy, g_aexp)
+                                PQb += w * _gamma_cdf_table(bot, loc, scale, gamma_tables[ic], g_xmax, g_dy, g_aexp)
+                            else:
+                                a = float(SAS_args[ai + 2, jt_c])
+                                PQt += w * _gamma_cdf(top, loc, scale, a)
+                                PQb += w * _gamma_cdf(bot, loc, scale, a)
+                        elif ctype == 2:
+                            loc = float(SAS_args[ai, jt_c])
+                            scale = float(SAS_args[ai + 1, jt_c])
+                            a = float(SAS_args[ai + 2, jt_c])
+                            b = float(SAS_args[ai + 3, jt_c])
+                            PQt += w * _beta_cdf(top, loc, scale, a, b)
+                            PQb += w * _beta_cdf(bot, loc, scale, a, b)
+                        elif ctype == 3:
+                            loc = float(SAS_args[ai, jt_c])
+                            scale = float(SAS_args[ai + 1, jt_c])
+                            a = float(SAS_args[ai + 2, jt_c])
+                            b = float(SAS_args[ai + 3, jt_c])
+                            PQt += w * _kumaraswamy_cdf(top, loc, scale, a, b)
+                            PQb += w * _kumaraswamy_cdf(bot, loc, scale, a, b)
+                    pQ_temp[c, iq] = (PQb - PQt) / dt_substep
+            else:
+                for iq in range(numflux):
+                    pQ_temp[c, iq] = 0.0
+
+            # ---- mQ, mR from current stage state ----
+            if sT_c > 0.0:
+                inv_sT = 1.0 / sT_c
+                for iq in range(numflux):
+                    Q_pQ_inv = Q_fullstep[jt_c, iq] * pQ_temp[c, iq] * inv_sT
+                    for s in range(numsol):
+                        mQ_temp[c, iq, s] = mT_temp[c, s] * alpha_fullstep[jt_c, iq, s] * Q_pQ_inv
+            else:
+                for iq in range(numflux):
+                    for s in range(numsol):
+                        mQ_temp[c, iq, s] = 0.0
+            for s in range(numsol):
+                if k1_fullstep[jt_c, s] > 0.0:
+                    mR_temp[c, s] = k1_fullstep[jt_c, s] * (C_eq_fullstep[jt_c, s] * sT_c - mT_temp[c, s])
+                else:
+                    mR_temp[c, s] = 0.0
+
+            # ---- accumulate RK averages ----
+            co = rk_coeffs[rk]
             for iq in range(numflux):
-                total_mQ += mQ[c, iq, s]
-            mT[c, s] -= total_mQ * dt_num
+                pQ_aver[c, iq] += co * pQ_temp[c, iq]
+                for s in range(numsol):
+                    mQ_aver[c, iq, s] += co * mQ_temp[c, iq, s]
+            for s in range(numsol):
+                mR_aver[c, s] += co * mR_temp[c, s]
+
+            # ---- propagate: next stage state, or final update from averages ----
+            last = rk == nstage - 1
+            sf_next = stagefrac[rk + 1]
+            dt_num = dt_substep * sf_next
+            sT_c = sT_start[c]
+            if last:
+                for s in range(numsol):
+                    mT_temp[c, s] = mT_start[c, s] + mR_aver[c, s] * dt_num
+            else:
+                for s in range(numsol):
+                    mT_temp[c, s] = mT_start[c, s] + mR_temp[c, s] * dt_num
+            if iT_substep == 0:
+                sT_c += J_fullstep[jt_c] * sf_next
+                for s in range(numsol):
+                    mT_temp[c, s] += J_fullstep[jt_c] * C_J_fullstep[jt_c, s] * sf_next
+            total_Q_pQ = 0.0
+            if last:
+                for iq in range(numflux):
+                    total_Q_pQ += Q_fullstep[jt_c, iq] * pQ_aver[c, iq]
+            else:
+                for iq in range(numflux):
+                    total_Q_pQ += Q_fullstep[jt_c, iq] * pQ_temp[c, iq]
+            sT_c -= total_Q_pQ * dt_num
+            if sT_c < 0.0:
+                sT_c = 0.0
+            if last:
+                for s in range(numsol):
+                    total_mQ = 0.0
+                    for iq in range(numflux):
+                        total_mQ += mQ_aver[c, iq, s]
+                    mT_temp[c, s] -= total_mQ * dt_num
+            else:
+                for s in range(numsol):
+                    total_mQ = 0.0
+                    for iq in range(numflux):
+                        total_mQ += mQ_temp[c, iq, s]
+                    mT_temp[c, s] -= total_mQ * dt_num
+
+        # ---- commit ----
+        sT_start[c] = sT_c
+        for s in range(numsol):
+            mT_start[c, s] = mT_temp[c, s]
 
 
 @_maybe_jit
@@ -1167,6 +910,7 @@ def _update_records(
     iT_substep,
     substep,
     total_num_substeps,
+    n_active,
     n_substeps,
     dt_substep,
     dt,
@@ -1196,19 +940,19 @@ def _update_records(
 ):
     """Accumulate results into output arrays."""
 
-    # Update output concentration
-    for jt_fullstep in range(timeseries_length):
-        for jt_ws in range(n_substeps):
-            for iq in range(numflux):
-                if Q_fullstep[jt_fullstep, iq] > 0.0:
-                    c = (total_num_substeps + jt_fullstep * n_substeps + jt_ws - iT_substep) % total_num_substeps
-                    for s in range(numsol):
-                        C_Q_fullstep[jt_fullstep, iq, s] += (
-                            mQ_aver[c, iq, s] * dt_substep / Q_fullstep[jt_fullstep, iq] / n_substeps
-                        )
+    # Update output concentration (iterate over active characteristics;
+    # inactive ones have mQ_aver == 0 and contribute nothing)
+    for c in range(n_active):
+        jt_fullstep = jt_fullstep_at[c]
+        for iq in range(numflux):
+            if Q_fullstep[jt_fullstep, iq] > 0.0:
+                for s in range(numsol):
+                    C_Q_fullstep[jt_fullstep, iq, s] += (
+                        mQ_aver[c, iq, s] * dt_substep / Q_fullstep[jt_fullstep, iq] / n_substeps
+                    )
 
     # Update old water fraction
-    for c in range(total_num_substeps):
+    for c in range(n_active):
         jt_c = jt_fullstep_at[c]
         for iq in range(numflux):
             P_old_fullstep[jt_c, iq] -= pQ_aver[c, iq] * dt_substep / n_substeps
@@ -1388,3 +1132,23 @@ def solve(
         int(numcomponent_total),
         int(numargs_total),
     )
+
+
+# ---------------------------------------------------------------------------
+# Warm up the Numba parallel threading layer from Python at import time.
+# Initializing it lazily from within jit-compiled code can segfault.
+# ---------------------------------------------------------------------------
+if _USE_NUMBA and os.environ.get("MESAS_PARALLEL", "1") != "0":
+    # Initialise numba's threading layer from Python at import time.
+    # Without this, the first invocation of a parallel=True function from
+    # inside another njit function can segfault intermittently on some
+    # platforms (observed with numba 0.61 on macOS arm64) due to lazy
+    # threading-layer initialisation.
+    @njit(parallel=True, cache=False)
+    def _warmup_threads(n):
+        acc = 0.0
+        for i in prange(n):
+            acc += i * 0.5
+        return acc
+
+    _warmup_threads(64)

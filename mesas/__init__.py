@@ -1,5 +1,13 @@
 """MESAS - Multiscale Estimation of StorAge Selection."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from mesas.sas.model import Model, ModelOptions, ModelResult, SoluteSpec
 
-__all__ = ["Model", "ModelOptions", "ModelResult", "SoluteSpec"]
+try:
+    __version__ = version("mesas")
+except PackageNotFoundError:
+    # Running from an uninstalled source tree
+    __version__ = "1.2026.0a1+dev"
+
+__all__ = ["Model", "ModelOptions", "ModelResult", "SoluteSpec", "__version__"]

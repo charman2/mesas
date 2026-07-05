@@ -18,7 +18,19 @@ import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 
-np.seterr(divide="ignore", invalid="ignore")
+
+def _require_recorded_state(model, i):
+    """Raise a helpful error unless the model recorded state at timestep i."""
+    result = getattr(model, "result", None)
+    if result is None or "sT" not in result:
+        raise ValueError("Model has no results. Call model.run() first.")
+    n_recorded = result["sT"].shape[1]
+    if i + 1 >= n_recorded:
+        raise ValueError(
+            f"Timestep i={i} requires recorded state at steps i and i+1, but only "
+            f"{n_recorded} state snapshots were recorded. Re-run the model with "
+            "record_state=True to record every timestep."
+        )
 
 
 def plot_transport_column(
@@ -36,14 +48,17 @@ def plot_transport_column(
     omega_max=None,
     valvegap=0.3,
     hspace=0.015,
-    artists_dict=OrderedDict(),
+    artists_dict=None,
     do_init=True,
 ):
+    if artists_dict is None:
+        artists_dict = OrderedDict()
+    if i is None:
+        i = 0
+    _require_recorded_state(model, i)
     dt = model.options["dt"]
     Q = model.data_df[flux].iloc[i]
     C_old = model.solute_parameters[sol]["C_old"]
-    if i is None:
-        i = 0
 
     sTs = np.r_[0, model.result["sT"][:-1, i]]
     mTs = np.r_[0, model.result["mT"][:-1, i, list(model._solorder).index(sol)]]
@@ -61,36 +76,39 @@ def plot_transport_column(
     model.sas_specs[flux].make_spec_ts()
     ST_mod = np.r_[0.0, model.sas_specs[flux].ST[i, :]]
     PQ_mod = np.r_[0.0, model.sas_specs[flux].P[i, :]]
-    omega_mod = np.diff(PQ_mod) / np.diff(ST_mod)
-    if omega_max is None:
-        omega_max = np.nanmax(omega_mod) * 1.1
-    if ST_max is None:
-        ST_max = ST_mod[-1] * 1.1
-    if np.isinf(ST_max):
-        ST_max = ST.max() * 1.1
+    # Zero-length segments and empty age bins legitimately produce 0/0 here;
+    # the resulting nan/inf entries are masked below.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        omega_mod = np.diff(PQ_mod) / np.diff(ST_mod)
+        if omega_max is None:
+            omega_max = np.nanmax(omega_mod) * 1.1
+        if ST_max is None:
+            ST_max = ST_mod[-1] * 1.1
+        if np.isinf(ST_max):
+            ST_max = ST.max() * 1.1
 
-    CS = np.where(sT > 0, mT / sT, 0)
+        CS = np.where(sT > 0, mT / sT, 0)
 
-    if dST is None:
-        ST_reg = np.linspace(0, ST_max, nST + 1)
-    else:
-        nST = int(ST_max / dST) + 1
-        ST_reg = np.arange(nST + 1) * dST
-    sT_reg = np.diff(ST_reg) / dt
-    spacer = sT_reg[0] * dt * valvegap
+        if dST is None:
+            ST_reg = np.linspace(0, ST_max, nST + 1)
+        else:
+            nST = int(ST_max / dST) + 1
+            ST_reg = np.arange(nST + 1) * dST
+        sT_reg = np.diff(ST_reg) / dt
+        spacer = sT_reg[0] * dt * valvegap
 
-    PQ_regmod = np.interp(ST_reg, ST_mod, PQ_mod, right=np.NaN)
-    omega_reg = np.diff(PQ_regmod) / dt / sT_reg
+        PQ_regmod = np.interp(ST_reg, ST_mod, PQ_mod, right=np.nan)
+        omega_reg = np.diff(PQ_regmod) / dt / sT_reg
 
-    PQ_reg = np.interp(ST_reg, ST, PQ)
-    pQ_reg = np.diff(PQ_reg)
-    MQ_reg = np.interp(ST_reg, ST, MQ)
-    any_old_reg = np.interp(ST_reg, ST, (PQ == PQ[-1]))[1:]
-    f_old_reg = any_old_reg * np.diff(PQ_regmod - PQ_reg) / np.diff(PQ_regmod)
+        PQ_reg = np.interp(ST_reg, ST, PQ)
+        pQ_reg = np.diff(PQ_reg)
+        MQ_reg = np.interp(ST_reg, ST, MQ)
+        any_old_reg = np.interp(ST_reg, ST, (PQ == PQ[-1]))[1:]
+        f_old_reg = any_old_reg * np.diff(PQ_regmod - PQ_reg) / np.diff(PQ_regmod)
 
-    CQ_reg_new = np.where(pQ_reg > 0, np.diff(MQ_reg) / (Q * pQ_reg), 0)
-    CQ_reg_new[np.isnan(CQ_reg_new)] = 0
-    CQ_reg = CQ_reg_new * (1 - f_old_reg) + C_old * f_old_reg
+        CQ_reg_new = np.where(pQ_reg > 0, np.diff(MQ_reg) / (Q * pQ_reg), 0)
+        CQ_reg_new[np.isnan(CQ_reg_new)] = 0
+        CQ_reg = CQ_reg_new * (1 - f_old_reg) + C_old * f_old_reg
 
     cmap = plt.get_cmap(cmap)
     if vrange is None:
@@ -188,7 +206,9 @@ def plot_transport_column(
         return ax1, ax2
 
 
-def plot_influx(model, ax=None, sharex=None, i=0, artists_dict=OrderedDict(), do_init=True):
+def plot_influx(model, ax=None, sharex=None, i=0, artists_dict=None, do_init=True):
+    if artists_dict is None:
+        artists_dict = OrderedDict()
     J = model.data_df[model.options["influx"]]
     if do_init:
         if ax is None:
@@ -200,10 +220,13 @@ def plot_influx(model, ax=None, sharex=None, i=0, artists_dict=OrderedDict(), do
         ax.spines["top"].set_visible(False)
         ax.set_title(model.options["influx"])
     if i is not None:
-        artists_dict["plot_influx timeline"].set_data(2 * [model.data_df.index[i]], ax.get_ylim())
+        timeline = artists_dict["plot_influx timeline"]
+        timeline.set_data(2 * [model.data_df.index[i]], timeline.axes.get_ylim())
 
 
-def plot_outflux(model, flux, ax=None, sharex=None, i=0, artists_dict=OrderedDict(), do_init=True):
+def plot_outflux(model, flux, ax=None, sharex=None, i=0, artists_dict=None, do_init=True):
+    if artists_dict is None:
+        artists_dict = OrderedDict()
     Q = model.data_df[flux]
     if do_init:
         if ax is None:
@@ -215,10 +238,13 @@ def plot_outflux(model, flux, ax=None, sharex=None, i=0, artists_dict=OrderedDic
         ax.spines["top"].set_visible(False)
         ax.set_title(flux)
     if i is not None:
-        artists_dict["plot_outflux timeline"].set_data(2 * [model.data_df.index[i]], ax.get_ylim())
+        timeline = artists_dict["plot_outflux timeline"]
+        timeline.set_data(2 * [model.data_df.index[i]], timeline.axes.get_ylim())
 
 
-def plot_influx_conc(model, sol, ax=None, sharex=None, i=0, artists_dict=OrderedDict(), do_init=True):
+def plot_influx_conc(model, sol, ax=None, sharex=None, i=0, artists_dict=None, do_init=True):
+    if artists_dict is None:
+        artists_dict = OrderedDict()
     C_J = model.data_df[sol]
     if do_init:
         if ax is None:
@@ -229,10 +255,13 @@ def plot_influx_conc(model, sol, ax=None, sharex=None, i=0, artists_dict=Ordered
         ax.spines["top"].set_visible(False)
         ax.set_title(sol)
     if i is not None:
-        artists_dict["plot_influx_conc timeline"].set_data(2 * [model.data_df.index[i]], ax.get_ylim())
+        timeline = artists_dict["plot_influx_conc timeline"]
+        timeline.set_data(2 * [model.data_df.index[i]], timeline.axes.get_ylim())
 
 
-def plot_outflux_conc(model, flux, sol, ax=None, sharex=None, i=0, artists_dict=OrderedDict(), do_init=True):
+def plot_outflux_conc(model, flux, sol, ax=None, sharex=None, i=0, artists_dict=None, do_init=True):
+    if artists_dict is None:
+        artists_dict = OrderedDict()
     colname = sol + " --> " + flux
     C_Q = model.data_df[colname]
     if do_init:
@@ -244,10 +273,16 @@ def plot_outflux_conc(model, flux, sol, ax=None, sharex=None, i=0, artists_dict=
         ax.spines["top"].set_visible(False)
         ax.set_title(colname)
     if i is not None:
-        artists_dict["plot_outflux_conc timeline"].set_data(2 * [model.data_df.index[i]], ax.get_ylim())
+        timeline = artists_dict["plot_outflux_conc timeline"]
+        timeline.set_data(2 * [model.data_df.index[i]], timeline.axes.get_ylim())
 
 
-def plot_SAS_cumulative(model, flux, ax=None, sharex=None, i=0, artists_dict=OrderedDict(), do_init=True):
+def plot_SAS_cumulative(model, flux, ax=None, sharex=None, i=0, artists_dict=None, do_init=True):
+    if artists_dict is None:
+        artists_dict = OrderedDict()
+    # The padded ST/P matrices only exist after make_spec_ts() has run
+    if getattr(model.sas_specs[flux], "ST", None) is None:
+        model.sas_specs[flux].make_spec_ts()
     if do_init:
         if ax is None:
             ax = plt.subplot(111, sharex=sharex)
@@ -270,24 +305,36 @@ def plot_SAS_cumulative(model, flux, ax=None, sharex=None, i=0, artists_dict=Ord
         artists_dict[f"plot_SAS {flux}"].set_data(model.sas_specs[flux].ST[i, :], model.sas_specs[flux].P[i, :])
 
 
-def plot_transport_column_with_timeseries(model, flux, sol, i=0, fig=None, artists_dict=OrderedDict(), **kwargs):
-    if fig is None:
-        fig = plt.figure(figsize=[11.5, 4.0])
-        fig.set_tight_layout(True)
+def plot_transport_column_with_timeseries(model, flux, sol, i=0, fig=None, artists_dict=None, do_init=True, **kwargs):
+    if artists_dict is None:
+        artists_dict = OrderedDict()
 
-    axTC = plt.subplot2grid((2, 3), (0, 1), rowspan=2)
-    axJ = plt.subplot2grid((2, 3), (0, 0))
-    axQ = plt.subplot2grid((2, 3), (0, 2))
-    axCJ = plt.subplot2grid((2, 3), (1, 0))
-    axCQ = plt.subplot2grid((2, 3), (1, 2))
+    if do_init:
+        if fig is None:
+            fig = plt.figure(figsize=[11.5, 4.0], layout="tight")
 
-    plot_transport_column(model, flux, sol, i=i, ax=axTC, artists_dict=artists_dict, **kwargs)
-    plot_influx(model, ax=axJ, i=i, artists_dict=artists_dict)
-    plot_outflux(model, flux, ax=axQ, sharex=axJ, i=i, artists_dict=artists_dict)
-    plot_influx_conc(model, sol, ax=axCJ, sharex=axJ, i=i, artists_dict=artists_dict)
-    plot_outflux_conc(model, flux, sol, ax=axCQ, sharex=axJ, i=i, artists_dict=artists_dict)
+        axTC = plt.subplot2grid((2, 3), (0, 1), rowspan=2, fig=fig)
+        axJ = plt.subplot2grid((2, 3), (0, 0), fig=fig)
+        axQ = plt.subplot2grid((2, 3), (0, 2), fig=fig)
+        axCJ = plt.subplot2grid((2, 3), (1, 0), fig=fig)
+        axCQ = plt.subplot2grid((2, 3), (1, 2), fig=fig)
 
-    return axTC, axJ, axQ, axCJ, axCQ
+        plot_transport_column(model, flux, sol, i=i, ax=axTC, artists_dict=artists_dict, **kwargs)
+        plot_influx(model, ax=axJ, i=i, artists_dict=artists_dict)
+        plot_outflux(model, flux, ax=axQ, sharex=axJ, i=i, artists_dict=artists_dict)
+        plot_influx_conc(model, sol, ax=axCJ, sharex=axJ, i=i, artists_dict=artists_dict)
+        plot_outflux_conc(model, flux, sol, ax=axCQ, sharex=axJ, i=i, artists_dict=artists_dict)
+
+        return axTC, axJ, axQ, axCJ, axCQ
+
+    # Update-only path: refresh the artists created during init in place,
+    # without creating new axes or patches (used by the animation).
+    plot_transport_column(model, flux, sol, i=i, artists_dict=artists_dict, do_init=False, **kwargs)
+    plot_influx(model, i=i, artists_dict=artists_dict, do_init=False)
+    plot_outflux(model, flux, i=i, artists_dict=artists_dict, do_init=False)
+    plot_influx_conc(model, sol, i=i, artists_dict=artists_dict, do_init=False)
+    plot_outflux_conc(model, flux, sol, i=i, artists_dict=artists_dict, do_init=False)
+    return None
 
 
 def make_transport_column_animation(model, flux, sol, fig=None, frames=None, **kwargs):
@@ -295,21 +342,20 @@ def make_transport_column_animation(model, flux, sol, fig=None, frames=None, **k
         frames = range(model._timeseries_length - 1)
 
     if fig is None:
-        fig = plt.figure(figsize=[11.5, 4.0])
-        fig.set_tight_layout(True)
+        fig = plt.figure(figsize=[11.5, 4.0], layout="tight")
 
     from matplotlib.animation import FuncAnimation
 
     artists = OrderedDict()
 
     def init():
-        i = 0
-        plot_transport_column_with_timeseries(model, flux, sol, i=i, fig=fig, artists_dict=artists, **kwargs)
-        return [artists[x] for x in artists.keys()]
+        plot_transport_column_with_timeseries(model, flux, sol, i=0, fig=fig, artists_dict=artists, **kwargs)
+        return list(artists.values())
 
     def update(frame):
-        i = frame
-        plot_transport_column_with_timeseries(model, flux, sol, i=i, fig=fig, artists_dict=artists, **kwargs)
-        return [artists[x] for x in artists.keys()]
+        plot_transport_column_with_timeseries(
+            model, flux, sol, i=frame, fig=fig, artists_dict=artists, do_init=False, **kwargs
+        )
+        return list(artists.values())
 
     return FuncAnimation(fig, update, frames=frames, init_func=init, blit=False)

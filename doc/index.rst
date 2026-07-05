@@ -3,7 +3,7 @@
 =====
 MESAS
 =====
-Multiresolution Estimation of StorAge Selection functions
+Multiscale Estimation of StorAge Selection functions
 
 
 What are StorAge Selection functions?
