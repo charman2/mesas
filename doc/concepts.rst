@@ -7,7 +7,8 @@ Concepts
 This page introduces the StorAge Selection (SAS) framework at a level
 appropriate for users of the package. For the full mathematical
 treatment, see `Harman (2015) <https://doi.org/10.1002/2014WR015707>`_
-and `Benettin et al. (2022) <https://doi.org/10.5194/gmd-15-3881-2022>`_.
+and `Benettin et al. (2022) <https://doi.org/10.5194/gmd-15-3881-2022>`_
+and `Harman and Xu Fei (2024) <https://gmd.copernicus.org/articles/17/477/2024/>`_.
 
 What is StorAge Selection?
 ==========================
