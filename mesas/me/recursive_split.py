@@ -339,9 +339,6 @@ def increase_resolution_leftfirst(
         else:
             new_model, new_rmse = last_accepted_model, last_accepted_rmse
 
-        _verbose("Trimming unused ST")
-        new_model.trim_unused_ST()
-
         # Optionally, make some plots
         if incres_fun is not None:
             incres_fun(new_model, f"iteration_{ITERATION}_all_components")
@@ -381,7 +378,7 @@ def increase_resolution_leftfirst(
             return initial_model
 
 
-def fit_model(model, include_C_old=True, learn_fun=None, index=None, jacobian_mode="analytical", **kwargs):
+def fit_model(model, include_C_old=True, learn_fun=None, index=None, jacobian_mode="numerical", **kwargs):
     """
     Fit the sas function to the data using a least-squares regression optimization
 
@@ -389,9 +386,19 @@ def fit_model(model, include_C_old=True, learn_fun=None, index=None, jacobian_mo
     :param include_C_old:
     :param learn_fun:
     :param index:
+    :param jacobian_mode: 'numerical' (default). 'analytical' is not currently
+        supported: the Numba solver does not implement parameter sensitivities,
+        so analytical jacobians would be silently zero.
     :param kwargs:
     :return:
     """
+
+    if jacobian_mode == "analytical":
+        raise NotImplementedError(
+            "jacobian_mode='analytical' is not supported: the solver does not "
+            "implement parameter sensitivities (they would be silently zero). "
+            "Use jacobian_mode='numerical'."
+        )
 
     _verbose("Fitting...", end="")
 

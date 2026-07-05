@@ -217,6 +217,12 @@ class ModelResult:
         self._data = data
 
     def __getattr__(self, name: str) -> Any:
+        # Guard against infinite recursion during unpickling/copying:
+        # protocol lookups (__setstate__, __deepcopy__, __reduce_ex__, ...)
+        # arrive before _data exists in __dict__, and referencing self._data
+        # here would re-enter __getattr__.
+        if name.startswith("_") or "_data" not in self.__dict__:
+            raise AttributeError(f"No result named '{name}'")
         # Check snake_case aliases first
         if name in self._ALIASES:
             return self._data[self._ALIASES[name]]
@@ -353,14 +359,21 @@ class Model:
     def _apply_options(self) -> None:
         """Resolve max_age, sT_init, and index_ts from current options."""
         opts = self._options_obj
+        if opts.sT_init is not None:
+            opts.sT_init = np.asarray(opts.sT_init, dtype=float)
+            if opts.max_age is not None and opts.max_age != len(opts.sT_init):
+                raise ValueError(
+                    f"max_age ({opts.max_age}) conflicts with len(sT_init) ({len(opts.sT_init)}). "
+                    "When sT_init is given, max_age is taken from its length; "
+                    "either omit max_age or make them consistent."
+                )
+            opts.max_age = len(opts.sT_init)
         if opts.max_age is None:
             opts.max_age = self._timeseries_length
         if opts.max_age > self._timeseries_length:
             raise ValueError(f"max_age ({opts.max_age}) cannot exceed timeseries_length ({self._timeseries_length})")
         if opts.sT_init is None:
             opts.sT_init = np.zeros(opts.max_age)
-        else:
-            opts.max_age = len(opts.sT_init)
         self._max_age = opts.max_age
         if opts.record_state is False:
             self._index_ts = np.array([self._timeseries_length - 1])
@@ -513,7 +526,18 @@ class Model:
         self._sas_specs[flux].make_spec_ts()
 
     def set_sas_fun(self, flux: str, label: str, sas_fun: Any) -> None:
-        """Replace the SAS function of a named component."""
+        """Replace the SAS function of a named component.
+
+        Parameters
+        ----------
+        flux : str
+            Name of the flux whose SAS spec contains the component.
+        label : str
+            Label of the component to modify.
+        sas_fun : Piecewise, Continuous, or list thereof
+            A single SAS function (applied at every timestep) or a list
+            with one function per timestep.
+        """
         self._sas_specs[flux].components[label].sas_fun = sas_fun
         self._sas_specs[flux].make_spec_ts()
 
@@ -697,6 +721,12 @@ class Model:
         debug = opts.debug
         warning = opts.warning
         jacobian = opts.jacobian
+        if jacobian:
+            raise NotImplementedError(
+                "options['jacobian']=True is not implemented in the Numba solver: "
+                "the returned sensitivities would be all zeros. Use numerical "
+                "jacobians instead (e.g. mesas.me.fit_model with jacobian_mode='numerical')."
+            )
         n_substeps = opts.n_substeps
         max_age = opts.max_age
         num_scheme = opts.num_scheme

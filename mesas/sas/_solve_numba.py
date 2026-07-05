@@ -270,36 +270,67 @@ def _gamma_cdf(ST, loc, scale, a):
 # ---------------------------------------------------------------------------
 
 _GAMMA_TABLE_SIZE = 20000
-_GAMMA_TABLE_XMAX = 40.0  # gammainc(a, 40) ≈ 1.0 for all practical a
-_GAMMA_TABLE_DX = _GAMMA_TABLE_XMAX / _GAMMA_TABLE_SIZE
+
+
+@_maybe_jit
+def _gamma_table_meta_for_shape(a):
+    """Compute (x_max, dy, a_exp) lookup-table metadata for shape ``a``.
+
+    The table domain [0, x_max] must cover the CDF up to where it is
+    indistinguishable from 1: gammainc(a, a + 12*sqrt(a) + 40) < 1e-12 from
+    1 for all a, so beyond x_max the lookup may safely return 1.0.
+
+    The table is uniform in the transformed variable y = x**a_exp with
+    a_exp = min(a/2, 1). Near x = 0 the CDF behaves like x**a, i.e. like
+    y**2 in the transformed variable, so linear interpolation stays accurate
+    even for a < 1 where the gamma pdf has an integrable singularity at 0
+    that a uniform-in-x grid cannot resolve.
+    """
+    x_max = a + 12.0 * np.sqrt(a) + 40.0
+    a_exp = min(a / 2.0, 1.0)
+    y_max = x_max**a_exp
+    dy = y_max / _GAMMA_TABLE_SIZE
+    return x_max, dy, a_exp
 
 
 @_maybe_jit
 def _build_gamma_table(a):
-    """Build lookup table for gammainc(a, x) on [0, x_max].
+    """Build lookup table for gammainc(a, x), uniform in y = x**a_exp.
 
     Returns a 1D array of size ``_GAMMA_TABLE_SIZE + 1`` containing
-    gammainc(a, x) at evenly spaced x values.
+    gammainc(a, x) at the grid points x = (i*dy)**(1/a_exp), where
+    (x_max, dy, a_exp) come from :func:`_gamma_table_meta_for_shape`.
     """
+    x_max, dy, a_exp = _gamma_table_meta_for_shape(a)
+    inv_a_exp = 1.0 / a_exp
     table = np.empty(_GAMMA_TABLE_SIZE + 1)
-    dx = _GAMMA_TABLE_DX
-    for i in range(_GAMMA_TABLE_SIZE + 1):
-        table[i] = _gammad(i * dx, a)
+    table[0] = 0.0
+    for i in range(1, _GAMMA_TABLE_SIZE + 1):
+        x = (i * dy) ** inv_a_exp
+        table[i] = _gammad(x, a)
     return table
 
 
 @_maybe_jit_inline
-def _gamma_cdf_table(ST, loc, scale, table):
-    """Gamma CDF via precomputed lookup table + linear interpolation."""
+def _gamma_cdf_table(ST, loc, scale, table, x_max, dy, a_exp):
+    """Gamma CDF via precomputed lookup table + linear interpolation.
+
+    The table is uniform in y = x**a_exp (see _build_gamma_table).
+    """
     if ST <= loc:
         return 0.0
     x = (ST - loc) / scale
-    if x >= _GAMMA_TABLE_XMAX:
+    if x >= x_max:
         return 1.0
-    # Linear interpolation in table
-    fx = x / _GAMMA_TABLE_DX
-    i = int(fx)
-    frac = fx - i
+    if a_exp == 1.0:
+        y = x
+    else:
+        y = x**a_exp
+    fy = y / dy
+    i = int(fy)
+    if i >= _GAMMA_TABLE_SIZE:
+        return table[_GAMMA_TABLE_SIZE]
+    frac = fy - i
     return table[i] + frac * (table[i + 1] - table[i])
 
 
@@ -416,6 +447,8 @@ def _solve_core(
     # back to direct evaluation via _gammad.
     gamma_tables = np.zeros((numcomponent_total, _GAMMA_TABLE_SIZE + 1))
     gamma_use_table = np.zeros(numcomponent_total, dtype=np.int64)
+    # Per-component table metadata: columns are (x_max, dy, a_exp)
+    gamma_table_meta = np.zeros((numcomponent_total, 3))
     for ic in range(numcomponent_total):
         if component_type[ic] == 1:
             ai = int(args_index_list[ic])
@@ -428,6 +461,10 @@ def _solve_core(
                     break
             if a_is_constant:
                 gamma_tables[ic, :] = _build_gamma_table(a_shape)
+                x_max, dy, a_exp = _gamma_table_meta_for_shape(a_shape)
+                gamma_table_meta[ic, 0] = x_max
+                gamma_table_meta[ic, 1] = dy
+                gamma_table_meta[ic, 2] = a_exp
                 gamma_use_table[ic] = 1
 
     # Allocate output arrays
@@ -542,6 +579,7 @@ def _solve_core(
                     timeseries_length,
                     gamma_tables,
                     gamma_use_table,
+                    gamma_table_meta,
                 )
                 _add_to_average(
                     pQ_aver, mQ_aver, mR_aver, pQ_temp, mQ_temp, mR_temp, 1.0, total_num_substeps, numflux, numsol
@@ -603,6 +641,7 @@ def _solve_core(
                         timeseries_length,
                         gamma_tables,
                         gamma_use_table,
+                        gamma_table_meta,
                     )
                     _add_to_average(
                         pQ_aver,
@@ -695,6 +734,7 @@ def _solve_core(
                         timeseries_length,
                         gamma_tables,
                         gamma_use_table,
+                        gamma_table_meta,
                     )
                     _add_to_average(
                         pQ_aver,
@@ -884,6 +924,7 @@ def _get_flux(
     timeseries_length,
     gamma_tables,
     gamma_use_table,
+    gamma_table_meta,
 ):
     """Compute fluxes from current state using SAS functions."""
 
@@ -913,6 +954,7 @@ def _get_flux(
         timeseries_length,
         gamma_tables,
         gamma_use_table,
+        gamma_table_meta,
     )
 
     # Solute mass flux: mQ = mT * alpha * Q * pQ / sT (well-mixed)
@@ -963,6 +1005,7 @@ def _calculate_pQ(
     timeseries_length,
     gamma_tables,
     gamma_use_table,
+    gamma_table_meta,
 ):
     """Evaluate SAS functions to compute pQ (transit time distribution).
 
@@ -1018,7 +1061,13 @@ def _calculate_pQ(
                 elif ctype == 1:
                     if gamma_use_table[ic]:
                         p_top = _gamma_cdf_table(
-                            ST_val, float(SAS_args[ai, jt_c]), float(SAS_args[ai + 1, jt_c]), gamma_tables[ic]
+                            ST_val,
+                            float(SAS_args[ai, jt_c]),
+                            float(SAS_args[ai + 1, jt_c]),
+                            gamma_tables[ic],
+                            gamma_table_meta[ic, 0],
+                            gamma_table_meta[ic, 1],
+                            gamma_table_meta[ic, 2],
                         )
                     else:
                         p_top = _gamma_cdf(
@@ -1055,7 +1104,13 @@ def _calculate_pQ(
                 elif ctype == 1:
                     if gamma_use_table[ic]:
                         p_bot = _gamma_cdf_table(
-                            ST_val, float(SAS_args[ai, jt_c]), float(SAS_args[ai + 1, jt_c]), gamma_tables[ic]
+                            ST_val,
+                            float(SAS_args[ai, jt_c]),
+                            float(SAS_args[ai + 1, jt_c]),
+                            gamma_tables[ic],
+                            gamma_table_meta[ic, 0],
+                            gamma_table_meta[ic, 1],
+                            gamma_table_meta[ic, 2],
                         )
                     else:
                         p_bot = _gamma_cdf(

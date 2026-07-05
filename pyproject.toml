@@ -79,3 +79,12 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Legacy benchmark scripts predating the refactor; lint-exempt until
+# they are consolidated into the curated test suites.
+"test/test_time.py" = ["W191", "F811", "F821", "F841", "E741"]
+"test/test_time2.py" = ["W191", "F811", "F821", "F841", "E741"]
+"test/test_benchmark.py" = ["W191", "F811", "F821", "F841", "E741"]
+"test/test_benchmark2.py" = ["W191", "F811", "F821", "F841", "E741"]
+"test/test_evapoconcentration.py" = ["W191", "F811", "F821", "F841", "E741"]

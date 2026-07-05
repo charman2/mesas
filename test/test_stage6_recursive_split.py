@@ -101,7 +101,6 @@ class TestFitModel:
             },
             dt=0.1,
             verbose=False,
-            jacobian=True,
             components_to_learn={"Q": ["Q_SAS"]},
         )
         model.run()
@@ -116,8 +115,9 @@ class TestFitModel:
         # RMSE should decrease
         assert rmse_after < rmse_before, f"RMSE did not decrease: {rmse_before:.6f} -> {rmse_after:.6f}"
 
-    def test_fit_model_analytical_jacobian(self):
-        """fit_model should work with analytical jacobian mode."""
+    def test_fit_model_analytical_jacobian_raises(self):
+        """Analytical jacobian mode is unsupported (solver returns zero
+        sensitivities) and must raise rather than silently do nothing."""
         from mesas.me.recursive_split import fit_model
 
         data_df = _make_estimation_data()
@@ -133,13 +133,11 @@ class TestFitModel:
             },
             dt=0.1,
             verbose=False,
-            jacobian=True,
             components_to_learn={"Q": ["Q_SAS"]},
         )
 
-        fitted_model, rmse = fit_model(model, verbose=False, jacobian_mode="analytical")
-        assert rmse > 0  # should have a finite positive RMSE
-        assert np.isfinite(rmse)
+        with pytest.raises(NotImplementedError, match="analytical"):
+            fit_model(model, verbose=False, jacobian_mode="analytical")
 
 
 @requires_sklearn
@@ -163,7 +161,6 @@ class TestCrossValidation:
             },
             dt=0.1,
             verbose=False,
-            jacobian=True,
             components_to_learn={"Q": ["Q_SAS"]},
         )
         model.run()
