@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install ruff
-        run: pip install ruff
+        run: pip install ruff==0.15.6
       - name: Lint
         run: |
           ruff check .

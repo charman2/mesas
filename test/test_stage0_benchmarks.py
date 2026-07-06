@@ -140,9 +140,9 @@ class TestSteadyStateBenchmarks:
         error = benchmark_C - predicted_C
         rms_error = _rms(error)
 
-        assert (
-            rms_error < self.TOLERANCE
-        ), f"Steady-state benchmark '{name}' failed: RMS error = {rms_error:.6f} (tolerance = {self.TOLERANCE})"
+        assert rms_error < self.TOLERANCE, (
+            f"Steady-state benchmark '{name}' failed: RMS error = {rms_error:.6f} (tolerance = {self.TOLERANCE})"
+        )
 
 
 class TestUnsteadyBenchmark:
