@@ -5,11 +5,11 @@ These tests record wall-clock execution times so that future changes can be
 checked for performance regressions. They use pytest-benchmark if available,
 otherwise fall back to simple timing with a generous timeout.
 """
+
 import time
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from mesas.sas.model import Model
 

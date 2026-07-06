@@ -105,6 +105,8 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 # Cell-based (# %%) tutorial scripts introduce imports as the narrative needs them.
 "examples/*.py" = ["E402"]
+# Legacy animation demo predating the refactor; lint-exempt until modernized.
+"examples/benchmark/animate_benchmark.py" = ["F841", "E731", "F821"]
 # Legacy benchmark scripts predating the refactor; lint-exempt until
 # they are consolidated into the curated test suites.
 "test/test_time.py" = ["W191", "F811", "F821", "F841", "E741"]

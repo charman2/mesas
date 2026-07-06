@@ -1,6 +1,9 @@
 """Shared fixtures for mesas test suite."""
+
 import os
+
 import pytest
+
 
 # Ensure tests can find data files regardless of where pytest is invoked from
 @pytest.fixture(autouse=True)
