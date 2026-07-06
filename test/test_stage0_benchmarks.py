@@ -8,20 +8,20 @@ accuracy baselines that must be maintained through all refactoring stages.
 Each test uses a steady-state configuration where analytical solutions exist,
 runs the model, and asserts that the RMS error is below a defined tolerance.
 """
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from mesas.sas.model import Model
-from scipy.special import lambertw
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _rms(x):
-    return np.sqrt(np.mean(x ** 2))
+    return np.sqrt(np.mean(x**2))
 
 
 def _make_steady_data(timeseries_length=500, dt=0.1, Q_0=1.0, S_0=5.0, S_m=1.0):
@@ -45,8 +45,8 @@ def _compute_benchmark_concentration(data_df, pQdisc, C_old, S_m, dt):
     C_J = data_df["C"].values
     im = int(S_m / (data_df["J"].iloc[0] * dt))  # index of minimum age
     benchmark = np.full(timeseries_length, C_old, dtype=float)
-    conv = np.convolve(C_J, pQdisc, mode="full")[:timeseries_length - im] * dt
-    old_frac = C_old * (1 - np.cumsum(pQdisc)[:timeseries_length - im] * dt)
+    conv = np.convolve(C_J, pQdisc, mode="full")[: timeseries_length - im] * dt
+    old_frac = C_old * (1 - np.cumsum(pQdisc)[: timeseries_length - im] * dt)
     benchmark[im:] = conv + old_frac
     return benchmark
 
@@ -66,9 +66,7 @@ STEADY_BENCHMARKS = {
             "func": "gamma",
             "args": {"a": 1.0 - 1e-5, "scale": "S_0", "loc": "S_m"},
         },
-        "pQdisc": lambda d, i: (
-            2 * np.log(1 + i * d) - np.log((1 + (-1 + i) * d) * (1 + d + i * d))
-        ) / d,
+        "pQdisc": lambda d, i: (2 * np.log(1 + i * d) - np.log((1 + (-1 + i) * d) * (1 + d + i * d))) / d,
         "pQdisc0": lambda d: (d + np.log(1 / (1 + d))) / d,
     },
     "kumaraswamy_young_biased": {
@@ -76,8 +74,7 @@ STEADY_BENCHMARKS = {
             "func": "kumaraswamy",
             "args": {"a": 1.0 - 1e-9, "b": 2.0 - 1e-9, "scale": "S_0", "loc": "S_m"},
         },
-        "pQdisc": lambda d, i: (2 * d)
-        / ((1 + (-1 + i) * d) * (1 + i * d) * (1 + d + i * d)),
+        "pQdisc": lambda d, i: (2 * d) / ((1 + (-1 + i) * d) * (1 + i * d) * (1 + d + i * d)),
         "pQdisc0": lambda d: d / (1 + d),
     },
 }
@@ -118,9 +115,7 @@ class TestSteadyStateBenchmarks:
         pQdisc[1:] = bm["pQdisc"](delta, i[1:]) / self.DT
 
         # Compute benchmark concentration
-        benchmark_C = _compute_benchmark_concentration(
-            data_df, pQdisc, self.C_OLD, self.S_M, self.DT
-        )
+        benchmark_C = _compute_benchmark_concentration(data_df, pQdisc, self.C_OLD, self.S_M, self.DT)
 
         # Set up and run the model
         flux_name = f"Q_{name}"
@@ -145,10 +140,9 @@ class TestSteadyStateBenchmarks:
         error = benchmark_C - predicted_C
         rms_error = _rms(error)
 
-        assert rms_error < self.TOLERANCE, (
-            f"Steady-state benchmark '{name}' failed: RMS error = {rms_error:.6f} "
-            f"(tolerance = {self.TOLERANCE})"
-        )
+        assert (
+            rms_error < self.TOLERANCE
+        ), f"Steady-state benchmark '{name}' failed: RMS error = {rms_error:.6f} (tolerance = {self.TOLERANCE})"
 
 
 class TestUnsteadyBenchmark:
@@ -167,15 +161,10 @@ class TestUnsteadyBenchmark:
         dt = 1
 
         # Compute analytical solution
-        benchmark_C = _analytical_unsteady_uniform(
-            data_df, S_init=Storage_init, C_old=C_old, dt=dt
-        )
+        benchmark_C = _analytical_unsteady_uniform(data_df, S_init=Storage_init, C_old=C_old, dt=dt)
 
-        data_df["S0"] = (
-            Storage_init
-            + (data_df["J"] - data_df["Q"] - data_df["ET"]).cumsum() * dt
-        )
-        data_df["S0"].iloc[1:] = data_df["S0"].rolling(2).mean().iloc[1:]
+        data_df["S0"] = Storage_init + (data_df["J"] - data_df["Q"] - data_df["ET"]).cumsum() * dt
+        data_df.loc[data_df.index[1:], "S0"] = data_df["S0"].rolling(2).mean().iloc[1:]
         data_df["Smin"] = 0.0
 
         sas_spec = {
@@ -203,9 +192,7 @@ class TestUnsteadyBenchmark:
         error = predicted_C - benchmark_C
         rms_error = _rms(error)
 
-        assert rms_error < self.TOLERANCE, (
-            f"Unsteady uniform benchmark failed: RMS = {rms_error:.6f}"
-        )
+        assert rms_error < self.TOLERANCE, f"Unsteady uniform benchmark failed: RMS = {rms_error:.6f}"
 
 
 def _analytical_unsteady_uniform(df, S_init=1000.0, C_old=50.0, dt=1):

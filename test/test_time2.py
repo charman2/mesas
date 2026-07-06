@@ -71,9 +71,8 @@ steady_benchmarks = {
             "args": {"a": 1.0 - 0.00001, "scale": "S_0", "loc": "S_m"},
         },
         "pQdisc": lambda delta, i: (
-            2 * np.log(1 + i * delta) - np.log((1 + (-1 + i) * delta) * (1 + delta + i * delta))
-        )
-        / delta,
+            (2 * np.log(1 + i * delta) - np.log((1 + (-1 + i) * delta) * (1 + delta + i * delta))) / delta
+        ),
         "pQdisc0": lambda delta: (delta + np.log(1 / (1 + delta))) / delta,
         "subplot": 1,
         "distname": "Gamma(1.0)",
@@ -86,9 +85,8 @@ other = {
             "args": {"a": 1.0, "scale": "S_0", "loc": "S_m"},
         },
         "pQdisc": lambda delta, i: (
-            2 * np.log(1 + i * delta) - np.log((1 + (-1 + i) * delta) * (1 + delta + i * delta))
-        )
-        / delta,
+            (2 * np.log(1 + i * delta) - np.log((1 + (-1 + i) * delta) * (1 + delta + i * delta))) / delta
+        ),
         "pQdisc0": lambda delta: (delta + np.log(1 / (1 + delta))) / delta,
         "subplot": 1,
         "distname": "Gamma(1.0)",
@@ -104,15 +102,17 @@ other = {
             },
         },
         "pQdisc": lambda delta, i: (
-            2
-            * 1
-            / np.cosh(delta - i * delta)
-            * 1
-            / np.cosh(delta + i * delta)
-            * np.sinh(delta) ** 2
-            * np.tanh(i * delta)
-        )
-        / delta,
+            (
+                2
+                * 1
+                / np.cosh(delta - i * delta)
+                * 1
+                / np.cosh(delta + i * delta)
+                * np.sinh(delta) ** 2
+                * np.tanh(i * delta)
+            )
+            / delta
+        ),
         "pQdisc0": lambda delta: 1 - np.tanh(delta) / delta,
         "subplot": 2,
         "distname": "Beta(2,1)",
@@ -163,15 +163,17 @@ other = {
             },
         },
         "pQdisc": lambda delta, i: (
-            2
-            * 1
-            / np.cosh(delta - i * delta)
-            * 1
-            / np.cosh(delta + i * delta)
-            * np.sinh(delta) ** 2
-            * np.tanh(i * delta)
-        )
-        / delta,
+            (
+                2
+                * 1
+                / np.cosh(delta - i * delta)
+                * 1
+                / np.cosh(delta + i * delta)
+                * np.sinh(delta) ** 2
+                * np.tanh(i * delta)
+            )
+            / delta
+        ),
         "pQdisc0": lambda delta: 1 - np.tanh(delta) / delta,
         "subplot": 2,
         "distname": "Kumaraswamy(2,1)",
@@ -260,7 +262,7 @@ def test_steady(makefigure=False):
         pQdisc[1:] = bm["pQdisc"](delta, i[1:]) / dt
         im = int(Tm / dt)
         data_df[f"{name} benchmark C"] = C_old
-        data_df[f"{name} benchmark C"][im:] = np.convolve(C_J, pQdisc, mode="full")[
+        data_df.loc[data_df.index[im:], f"{name} benchmark C"] = np.convolve(C_J, pQdisc, mode="full")[
             : timeseries_length - im
         ] * dt + C_old * (1 - np.cumsum(pQdisc)[: timeseries_length - im] * dt)
         data_df[f"{name} benchmark t"] = data_df["t"]
@@ -294,7 +296,7 @@ def test_steady(makefigure=False):
             data_df[f"{name} benchmark C"].values - data_df[f"C --> {name}"].values
         )  # /data_df[f'{name} benchmark C'].values
         # logging.info(f'{name} error01 = {err01.mean()}')
-        logging.info(f"{tic} : {toc-tic} {name} time 01")
+        logging.info(f"{tic} : {toc - tic} {name} time 01")
 
         model = Model(
             data_df,
@@ -540,7 +542,7 @@ def test_unsteady_uniform(makefigure=False, tmax=500):
         Storage_init + (data_df["J"] - data_df["Q"] - data_df["ET"]).cumsum() * dt
     )  # This should be the total storage volume, solve the mass balance equation
     # average stoage over the timestep
-    data_df["S0"][1:] = data_df["S0"].rolling(2).mean()[1:]
+    data_df.loc[data_df.index[1:], "S0"] = data_df["S0"].rolling(2).mean()[1:]
     data_df["Smin"] = 0.0
     sas_spec = {
         "Q": {
