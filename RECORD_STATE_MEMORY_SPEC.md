@@ -149,6 +149,43 @@ Design points:
   Windows file-lock semantics on cleanup (test in CI matrix); user must
   manage the run directory's lifetime.
 
+**Measured performance impact** (2026-07-07, Apple Silicon laptop NVMe;
+microbenchmark reproducing the solver's exact write pattern — age-major
+accumulation into slices `iT`/`iT+1`, 1.4 GB across 7 channels, the same
+volume as an N=5000 full-record run):
+
+| Strategy | Time | vs RAM |
+|---|---|---|
+| RAM (`np.zeros`) | 0.285 s | 1.0× |
+| memmap, lazy OS write-back | 0.576 s | 2.0× |
+| memmap + incremental flush (256-slice) | 1.08 s | 3.8× |
+| memmap + full forced `flush()` | 1.73 s | 6.1× (≈1.1 GB/s SSD) |
+
+Interpretation. The overhead applies only to the *recording* portion of a
+run, and lazy write-back is the default user experience (dirty pages flush
+in background after `run()` returns). Two regimes:
+
+1. *Recorded state fits in page cache* (all currently-possible runs): the
+   worst case is a uniform-SAS run, which is maximally recording-dominated —
+   there the ~0.3 s excess on 1.4 GB projects to **~25–30 % slowdown**
+   (0.89 s → ~1.15 s at N=5000). Gamma/substep runs are compute-dominated:
+   **low single-digit %**. If `run()` should not return until data is
+   durable, forced flush adds disk-bandwidth time (~1.1 GB/s here).
+2. *Recorded state exceeds RAM* (the runs this feature exists for): write-
+   back is on the critical path, so throughput is bounded by SSD bandwidth.
+   Full-float64-everything generation peaks at ~1.6 GB/s (uniform case) vs
+   ~1.1 GB/s disk → **up to ~1.5–2× slower** worst case. With O4 (sT+pQ) +
+   O2 (float32) the generated volume drops ~7× to ~0.2–0.3 GB/s and the
+   SSD keeps up — **overhead becomes negligible exactly in the recommended
+   configuration**. And the baseline for these runs is "impossible" (OOM),
+   so even the worst case is a strict win.
+
+Mitigation worth implementing: periodic `msync` of *finalized* slices (the
+incremental strategy above) bounds the dirty-page backlog so the OS never
+stalls the process in a write-back storm; it costs ~2× on the recording
+portion but makes throughput predictable. Make it automatic when the
+predicted recorded volume exceeds ~25 % of physical RAM.
+
 ### O6 — True streaming with compression (zarr/HDF5), O(N) resident
 
 Restructure the outer age loop so each finalized age slice is flushed
@@ -161,6 +198,13 @@ flush (it only needs slices `iT-1`, `iT`).
 - Effort: L (loop restructuring around the fused parallel kernel, objmode
   or chunked-call architecture; performance regression risk for the Phase 2
   fusion; new optional dependency).
+- Performance expectation (not measured): compression throughput is
+  ~0.5–1 GB/s/core (zstd) and competes with the parallel solver for the
+  same cores — estimate **10–30 % slowdown** in steady state, *plus* the
+  unquantified risk that restructuring the outer loop degrades the Phase 2
+  fused-kernel speedup itself. Disk bandwidth stops mattering (compressed
+  volume is 5–20× smaller), so this trades a predictable I/O bound for a
+  CPU tax on every run.
 - Verdict: hold in reserve — only if O5 proves insufficient in practice.
 
 ### O7 — Age-axis coarsening (log-spaced age bins)
