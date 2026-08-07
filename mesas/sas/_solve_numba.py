@@ -36,6 +36,9 @@ except ImportError:
 # Set to False to disable JIT compilation during development/debugging
 _USE_NUMBA = True
 
+# Names of the recorded state arrays users can select via record_arrays
+RECORDABLE_ARRAYS = frozenset({"sT", "pQ", "mT", "mQ", "mR", "water_balance", "solute_balance"})
+
 
 def _maybe_jit(func):
     """Apply @njit if Numba is available and enabled."""
@@ -423,8 +426,23 @@ def _solve_core(
     num_output_fullsteps,  # int
     numcomponent_total,  # int
     numargs_total,  # int
+    sT_outputstep,  # (max_age, num_output_fullsteps + 1), age-first; (1, 1) if not recorded
+    mT_outputstep,  # (max_age, num_output_fullsteps + 1, numsol); (1, 1, 1) if not recorded
+    pQ_outputstep,  # (max_age, num_output_fullsteps, numflux); (1, 1, 1) if not recorded
+    mQ_outputstep,  # (max_age, num_output_fullsteps, numflux, numsol); (1, 1, 1, 1) if not recorded
+    mR_outputstep,  # (max_age, num_output_fullsteps, numsol); (1, 1, 1) if not recorded
+    rec_sT,  # bool: write into sT_outputstep
+    rec_mT,  # bool
+    rec_pQ,  # bool
+    rec_mQ,  # bool
+    rec_mR,  # bool
 ):
-    """Core SAS solver — Numba-compiled equivalent of solveSAS in solve.f90."""
+    """Core SAS solver — Numba-compiled equivalent of solveSAS in solve.f90.
+
+    Output arrays are allocated by the caller (`solve`) in age-first layout
+    and may be RAM ndarrays or disk-backed memmaps of float64 or float32;
+    the kernels only ever write to them (accumulate), never read.
+    """
 
     total_num_substeps = timeseries_length * n_substeps
     dt_substep = dt / n_substeps
@@ -483,19 +501,9 @@ def _solve_core(
                 gamma_table_meta[ic, 2] = a_exp
                 gamma_use_table[ic] = 1
 
-    # Allocate output arrays
+    # Allocate the always-in-RAM outputs (O(N), small); the O(N^2) recorded
+    # state arrays are allocated by the caller and passed in.
     C_Q_fullstep = np.zeros((timeseries_length, numflux, numsol))
-    sT_outputstep = np.zeros((num_output_fullsteps + 1, max_age))
-    mT_outputstep = np.zeros((num_output_fullsteps + 1, numsol, max_age))
-    pQ_outputstep = np.zeros((num_output_fullsteps, numflux, max_age))
-    mQ_outputstep = np.zeros((num_output_fullsteps, numflux, numsol, max_age))
-    mR_outputstep = np.zeros((num_output_fullsteps, numsol, max_age))
-    WaterBalance_outputstep = np.zeros((num_output_fullsteps, max_age))
-    SoluteBalance_outputstep = np.zeros((num_output_fullsteps, numsol, max_age))
-    # Jacobian outputs (placeholders — not yet implemented in Numba)
-    ds_outputstep = np.zeros((num_output_fullsteps + 1, numargs_total, max_age))
-    dm_outputstep = np.zeros((num_output_fullsteps + 1, numargs_total, numsol, max_age))
-    dC_fullstep = np.zeros((timeseries_length, numargs_total, numflux, numsol))
 
     P_old_fullstep = np.ones((timeseries_length, numflux))
 
@@ -513,12 +521,8 @@ def _solve_core(
     jt_fullstep_at = np.zeros(total_num_substeps, dtype=np.int64)
     jt_substep_at = np.zeros(total_num_substeps, dtype=np.int64)
 
-    # Initial conditions
-    sT_outputstep[0, :] = sT_init_fullstep
-    # mT_init is (max_age, numsol) but mT_outputstep is (output_steps+1, numsol, max_age)
-    for s in range(numsol):
-        for t in range(max_age):
-            mT_outputstep[0, s, t] = mT_init_fullstep[t, s]
+    # Initial conditions for the recorded state are set by the caller
+    # (column 0 of the age-first sT/mT arrays).
 
     # Unified RK stage tables: stagefrac[rk] is the evaluation fraction of
     # stage rk; stagefrac[rk+1] is the propagation fraction to the next stage
@@ -674,6 +678,11 @@ def _solve_core(
                 numsol,
                 max_age,
                 timeseries_length,
+                rec_sT,
+                rec_mT,
+                rec_pQ,
+                rec_mQ,
+                rec_mR,
             )
 
             iT_prev_fullstep = iT_fullstep
@@ -688,43 +697,12 @@ def _solve_core(
                 if Q_fullstep[jt, iq] > 0:
                     C_Q_fullstep[jt, iq, s] += alpha_fullstep[jt, iq, s] * C_old[s] * P_old_fullstep[jt, iq]
 
-    # Calculate mass balances
-    _calculate_balances(
-        iT_fullstep,
-        max_age,
-        num_output_fullsteps,
-        output_these_fullsteps,
-        J_fullstep,
-        Q_fullstep,
-        C_J_fullstep,
-        sT_outputstep,
-        mT_outputstep,
-        pQ_outputstep,
-        mQ_outputstep,
-        mR_outputstep,
-        WaterBalance_outputstep,
-        SoluteBalance_outputstep,
-        dt,
-        numflux,
-        numsol,
-    )
+    # Mass balances are computed by the caller (`solve`) as a post-pass.
 
     if verbose:
         print(" ...Finished...")
 
-    return (
-        sT_outputstep,
-        pQ_outputstep,
-        WaterBalance_outputstep,
-        mT_outputstep,
-        mQ_outputstep,
-        mR_outputstep,
-        C_Q_fullstep,
-        ds_outputstep,
-        dm_outputstep,
-        dC_fullstep,
-        SoluteBalance_outputstep,
-    )
+    return C_Q_fullstep
 
 
 @_maybe_jit_parallel
@@ -937,8 +915,13 @@ def _update_records(
     numsol,
     max_age,
     timeseries_length,
+    rec_sT,
+    rec_mT,
+    rec_pQ,
+    rec_mQ,
+    rec_mR,
 ):
-    """Accumulate results into output arrays."""
+    """Accumulate results into output arrays (age-first layout, write-only)."""
 
     # Update output concentration (iterate over active characteristics;
     # inactive ones have mQ_aver == 0 and contribute nothing)
@@ -958,88 +941,108 @@ def _update_records(
             P_old_fullstep[jt_c, iq] -= pQ_aver[c, iq] * dt_substep / n_substeps
 
     # Timestep-averaged transit time distribution
-    if iT_fullstep < max_age - 1:
+    if (rec_pQ or rec_mQ or rec_mR) and iT_fullstep < max_age - 1:
         for outputstep in range(num_output_fullsteps):
             jt_fullstep = output_these_fullsteps[outputstep]
             for jt_ws in range(n_substeps):
                 if jt_ws < substep:
                     c = (total_num_substeps + jt_fullstep * n_substeps + jt_ws - iT_substep) % total_num_substeps
                     for iq in range(numflux):
-                        pQ_outputstep[outputstep, iq, iT_fullstep + 1] += pQ_aver[c, iq] * norm
+                        if rec_pQ:
+                            pQ_outputstep[iT_fullstep + 1, outputstep, iq] += pQ_aver[c, iq] * norm
+                        if rec_mQ:
+                            for s in range(numsol):
+                                mQ_outputstep[iT_fullstep + 1, outputstep, iq, s] += mQ_aver[c, iq, s] * norm
+                    if rec_mR:
                         for s in range(numsol):
-                            mQ_outputstep[outputstep, iq, s, iT_fullstep + 1] += mQ_aver[c, iq, s] * norm
-                    for s in range(numsol):
-                        mR_outputstep[outputstep, s, iT_fullstep + 1] += mR_aver[c, s] * norm
+                            mR_outputstep[iT_fullstep + 1, outputstep, s] += mR_aver[c, s] * norm
 
-    for outputstep in range(num_output_fullsteps):
-        jt_fullstep = output_these_fullsteps[outputstep]
-        for jt_ws in range(n_substeps):
-            if jt_ws >= substep:
-                c = (total_num_substeps + jt_fullstep * n_substeps + jt_ws - iT_substep) % total_num_substeps
-                for iq in range(numflux):
-                    pQ_outputstep[outputstep, iq, iT_fullstep] += pQ_aver[c, iq] * norm
-                    for s in range(numsol):
-                        mQ_outputstep[outputstep, iq, s, iT_fullstep] += mQ_aver[c, iq, s] * norm
-                for s in range(numsol):
-                    mR_outputstep[outputstep, s, iT_fullstep] += mR_aver[c, s] * norm
+    if rec_pQ or rec_mQ or rec_mR:
+        for outputstep in range(num_output_fullsteps):
+            jt_fullstep = output_these_fullsteps[outputstep]
+            for jt_ws in range(n_substeps):
+                if jt_ws >= substep:
+                    c = (total_num_substeps + jt_fullstep * n_substeps + jt_ws - iT_substep) % total_num_substeps
+                    for iq in range(numflux):
+                        if rec_pQ:
+                            pQ_outputstep[iT_fullstep, outputstep, iq] += pQ_aver[c, iq] * norm
+                        if rec_mQ:
+                            for s in range(numsol):
+                                mQ_outputstep[iT_fullstep, outputstep, iq, s] += mQ_aver[c, iq, s] * norm
+                    if rec_mR:
+                        for s in range(numsol):
+                            mR_outputstep[iT_fullstep, outputstep, s] += mR_aver[c, s] * norm
 
     # Extract substep state at output timesteps
-    for outputstep in range(num_output_fullsteps):
-        jt_fullstep = output_these_fullsteps[outputstep]
-        jt_ws = n_substeps - 1
-        c = (total_num_substeps + jt_fullstep * n_substeps + jt_ws - iT_substep) % total_num_substeps
-        sT_outputstep[outputstep + 1, iT_fullstep] += sT_start[c] / n_substeps
-        for s in range(numsol):
-            mT_outputstep[outputstep + 1, s, iT_fullstep] += mT_start[c, s] / n_substeps
+    if rec_sT or rec_mT:
+        for outputstep in range(num_output_fullsteps):
+            jt_fullstep = output_these_fullsteps[outputstep]
+            jt_ws = n_substeps - 1
+            c = (total_num_substeps + jt_fullstep * n_substeps + jt_ws - iT_substep) % total_num_substeps
+            if rec_sT:
+                sT_outputstep[iT_fullstep, outputstep + 1] += sT_start[c] / n_substeps
+            if rec_mT:
+                for s in range(numsol):
+                    mT_outputstep[iT_fullstep, outputstep + 1, s] += mT_start[c, s] / n_substeps
 
 
 @_maybe_jit
-def _calculate_balances(
-    iT_fullstep_unused,
+def _calculate_water_balance(
     max_age,
     num_output_fullsteps,
     output_these_fullsteps,
     J_fullstep,
     Q_fullstep,
-    C_J_fullstep,
     sT_outputstep,
-    mT_outputstep,
     pQ_outputstep,
+    WaterBalance_outputstep,
+    dt,
+    numflux,
+):
+    """Compute water balance residuals (age-first layout)."""
+    for iT_fullstep in range(max_age):
+        for outputstep in range(num_output_fullsteps):
+            jt_fullstep = output_these_fullsteps[outputstep]
+            if iT_fullstep == 0:
+                wb = J_fullstep[jt_fullstep] - sT_outputstep[iT_fullstep, outputstep + 1]
+            else:
+                wb = sT_outputstep[iT_fullstep - 1, outputstep] - sT_outputstep[iT_fullstep, outputstep + 1]
+            for iq in range(numflux):
+                wb -= Q_fullstep[jt_fullstep, iq] * pQ_outputstep[iT_fullstep, outputstep, iq] * dt
+            WaterBalance_outputstep[iT_fullstep, outputstep] = wb
+
+
+@_maybe_jit
+def _calculate_solute_balance(
+    max_age,
+    num_output_fullsteps,
+    output_these_fullsteps,
+    J_fullstep,
+    C_J_fullstep,
+    mT_outputstep,
     mQ_outputstep,
     mR_outputstep,
-    WaterBalance_outputstep,
     SoluteBalance_outputstep,
     dt,
     numflux,
     numsol,
 ):
-    """Compute water and solute mass balance residuals."""
+    """Compute solute mass balance residuals (age-first layout)."""
     for iT_fullstep in range(max_age):
         for outputstep in range(num_output_fullsteps):
             jt_fullstep = output_these_fullsteps[outputstep]
-
-            # Water balance
-            if iT_fullstep == 0:
-                wb = J_fullstep[jt_fullstep] - sT_outputstep[outputstep + 1, iT_fullstep]
-            else:
-                wb = sT_outputstep[outputstep, iT_fullstep - 1] - sT_outputstep[outputstep + 1, iT_fullstep]
-            for iq in range(numflux):
-                wb -= Q_fullstep[jt_fullstep, iq] * pQ_outputstep[outputstep, iq, iT_fullstep] * dt
-            WaterBalance_outputstep[outputstep, iT_fullstep] = wb
-
-            # Solute balance
             for s in range(numsol):
                 if iT_fullstep == 0:
                     sb = (
                         C_J_fullstep[jt_fullstep, s] * J_fullstep[jt_fullstep]
-                        - mT_outputstep[outputstep + 1, s, iT_fullstep]
+                        - mT_outputstep[iT_fullstep, outputstep + 1, s]
                     )
                 else:
-                    sb = mT_outputstep[outputstep, s, iT_fullstep - 1] - mT_outputstep[outputstep + 1, s, iT_fullstep]
+                    sb = mT_outputstep[iT_fullstep - 1, outputstep, s] - mT_outputstep[iT_fullstep, outputstep + 1, s]
                 for iq in range(numflux):
-                    sb -= mQ_outputstep[outputstep, iq, s, iT_fullstep] * dt
-                sb += mR_outputstep[outputstep, s, iT_fullstep] * dt
-                SoluteBalance_outputstep[outputstep, s, iT_fullstep] = sb
+                    sb -= mQ_outputstep[iT_fullstep, outputstep, iq, s] * dt
+                sb += mR_outputstep[iT_fullstep, outputstep, s] * dt
+                SoluteBalance_outputstep[iT_fullstep, outputstep, s] = sb
 
 
 # ---------------------------------------------------------------------------
@@ -1078,10 +1081,31 @@ def solve(
     num_output_fullsteps,
     numcomponent_total,
     numargs_total,
+    *,
+    record_to=None,
+    record_arrays=None,
+    record_dtype="float64",
 ):
     """SAS transport solver — drop-in replacement for the Fortran solvesas.
 
-    Parameters and return values match the f2py interface exactly.
+    Positional parameters and the return tuple match the f2py interface.
+    The recorded state arrays are returned in age-first layout
+    ``(max_age, n_recorded_steps, ...)``. The Jacobian slots of the return
+    tuple (``dsTdSj``, ``dmTdSj``, ``dCdSj``) are singleton placeholders —
+    the Numba solver does not compute Jacobians.
+
+    Keyword parameters
+    ------------------
+    record_to : str or None
+        Directory in which to allocate the recorded state arrays as
+        disk-backed ``.npy`` memmaps (created if needed). ``None`` (default)
+        allocates in RAM.
+    record_arrays : iterable of str or None
+        Which arrays to record: subset of {"sT", "pQ", "mT", "mQ", "mR",
+        "water_balance", "solute_balance"}. ``None`` records all.
+        Unrecorded arrays are returned as singleton placeholders.
+    record_dtype : {"float64", "float32"}
+        Storage dtype of the recorded arrays. Computation is float64 always.
     """
     # Ensure contiguous 2D float64 arrays.
     # SAS_args and P_list may arrive as 3D from _create_sas_lookup;
@@ -1103,7 +1127,50 @@ def solve(
     numargs_list = np.ascontiguousarray(numargs_list, dtype=np.int64)
     output_these_fullsteps = np.ascontiguousarray(output_these_fullsteps, dtype=np.int64)
 
-    return _solve_core(
+    # --- Allocate the recorded state arrays (age-first layout) ---
+    if record_arrays is None:
+        rec = RECORDABLE_ARRAYS
+    else:
+        rec = frozenset(record_arrays)
+    if record_dtype not in ("float64", "float32"):
+        raise ValueError(f"record_dtype must be 'float64' or 'float32', got {record_dtype!r}")
+    out_dtype = np.float32 if record_dtype == "float32" else np.float64
+    A = int(max_age)
+    T_out = int(num_output_fullsteps)
+    q = int(numflux)
+    ns = int(numsol)
+    # Balance arrays can only be computed from recorded ingredients
+    wb_on = {"water_balance", "sT", "pQ"} <= rec
+    sb_on = {"solute_balance", "mT", "mQ", "mR"} <= rec and ns > 0
+
+    if record_to is not None:
+        record_to = os.fspath(record_to)
+        os.makedirs(record_to, exist_ok=True)
+
+    def _alloc(name, shape, on):
+        if not on:
+            return np.zeros((1,) * len(shape), dtype=out_dtype)
+        if record_to is None:
+            return np.zeros(shape, dtype=out_dtype)
+        return np.lib.format.open_memmap(
+            os.path.join(record_to, name + ".npy"), mode="w+", dtype=out_dtype, shape=shape
+        )
+
+    sT_out = _alloc("sT", (A, T_out + 1), "sT" in rec)
+    mT_out = _alloc("mT", (A, T_out + 1, ns), "mT" in rec)
+    pQ_out = _alloc("pQ", (A, T_out, q), "pQ" in rec)
+    mQ_out = _alloc("mQ", (A, T_out, q, ns), "mQ" in rec)
+    mR_out = _alloc("mR", (A, T_out, ns), "mR" in rec)
+    WB_out = _alloc("water_balance", (A, T_out), wb_on)
+    SB_out = _alloc("solute_balance", (A, T_out, ns), sb_on)
+
+    # Initial conditions: column 0 of the age-first sT/mT arrays
+    if "sT" in rec:
+        sT_out[:, 0] = sT_init_fullstep[:A]
+    if "mT" in rec:
+        mT_out[:, 0, :] = mT_init_fullstep[:A, :]
+
+    C_Q_fullstep = _solve_core(
         J_fullstep,
         Q_fullstep,
         SAS_args,
@@ -1131,6 +1198,82 @@ def solve(
         int(num_output_fullsteps),
         int(numcomponent_total),
         int(numargs_total),
+        sT_out,
+        mT_out,
+        pQ_out,
+        mQ_out,
+        mR_out,
+        "sT" in rec,
+        "mT" in rec,
+        "pQ" in rec,
+        "mQ" in rec,
+        "mR" in rec,
+    )
+
+    # --- Mass balance post-passes (read the recorded state sequentially) ---
+    if wb_on:
+        _calculate_water_balance(
+            int(max_age),
+            int(num_output_fullsteps),
+            output_these_fullsteps,
+            J_fullstep,
+            Q_fullstep,
+            sT_out,
+            pQ_out,
+            WB_out,
+            float(dt),
+            int(numflux),
+        )
+    if sb_on:
+        _calculate_solute_balance(
+            int(max_age),
+            int(num_output_fullsteps),
+            output_these_fullsteps,
+            J_fullstep,
+            C_J_fullstep,
+            mT_out,
+            mQ_out,
+            mR_out,
+            SB_out,
+            float(dt),
+            int(numflux),
+            int(numsol),
+        )
+
+    # For disk-backed outputs: flush writes, then hand back read-only views
+    if record_to is not None:
+
+        def _reopen(arr, name, on):
+            if not on:
+                return arr
+            arr.flush()
+            return np.load(os.path.join(record_to, name + ".npy"), mmap_mode="r")
+
+        sT_out = _reopen(sT_out, "sT", "sT" in rec)
+        mT_out = _reopen(mT_out, "mT", "mT" in rec)
+        pQ_out = _reopen(pQ_out, "pQ", "pQ" in rec)
+        mQ_out = _reopen(mQ_out, "mQ", "mQ" in rec)
+        mR_out = _reopen(mR_out, "mR", "mR" in rec)
+        WB_out = _reopen(WB_out, "water_balance", wb_on)
+        SB_out = _reopen(SB_out, "solute_balance", sb_on)
+
+    # Jacobian slots: singleton placeholders (not computed by this solver)
+    ds_placeholder = np.zeros((1, 1, 1))
+    dm_placeholder = np.zeros((1, 1, 1, 1))
+    dC_placeholder = np.zeros((1, 1, 1, 1))
+
+    return (
+        sT_out,
+        pQ_out,
+        WB_out,
+        mT_out,
+        mQ_out,
+        mR_out,
+        C_Q_fullstep,
+        ds_placeholder,
+        dm_placeholder,
+        dC_placeholder,
+        SB_out,
     )
 
 

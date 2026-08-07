@@ -28,7 +28,7 @@ import pandas as pd
 
 from mesas.sas.specs import SAS_Spec
 
-from ._solve_numba import solve
+from ._solve_numba import RECORDABLE_ARRAYS, solve
 
 dtype = np.float64
 
@@ -72,6 +72,30 @@ class ModelOptions:
         If ``True``, record every timestep; if ``False``, record only the
         last; if a string, treat it as a boolean column name in data_df.
         Default False.
+    record_every : int or None
+        Record the state at the end of every k-th timestep (a memory-saving
+        alternative to ``record_state=True``; the recorded arrays shrink
+        proportionally). Cannot be combined with a ``record_state`` column
+        name. Default None.
+    record_arrays : "all" or iterable of str
+        Which state arrays to record: subset of {"sT", "pQ", "mT", "mQ",
+        "mR", "water_balance", "solute_balance"}. Arrays not selected are
+        never allocated (``mQ`` is typically the largest). Balance arrays
+        require their ingredients: ``water_balance`` needs ``sT`` and
+        ``pQ``; ``solute_balance`` needs ``mT``, ``mQ`` and ``mR``.
+        Default "all".
+    record_dtype : {"float64", "float32"}
+        Storage dtype for the recorded arrays (halves memory when
+        "float32"). Computation is always float64; balance diagnostics
+        recorded as float32 are correspondingly less precise. Default
+        "float64".
+    record_to : str or None
+        Directory in which to store the recorded arrays as disk-backed
+        ``.npy`` memory-maps instead of RAM (created if needed). Removes
+        RAM as the constraint for long runs; results in
+        :attr:`Model.result` become read-only memmap arrays, and the
+        directory is self-describing and reloadable via
+        :meth:`Model.load_state`. Default None (RAM).
     validate_inputs : bool
         If ``True`` (default), :meth:`Model.run` first checks the input
         data for NaN values and negative fluxes and raises a descriptive
@@ -91,6 +115,10 @@ class ModelOptions:
     ST_smallest_segment: float = 1.0 / 100
     ST_largest_segment: float = np.inf
     record_state: bool | str = False
+    record_every: int | None = None
+    record_arrays: Any = "all"
+    record_dtype: str = "float64"
+    record_to: str | None = None
     validate_inputs: bool = True
 
     # Names of all valid option keys (for backward-compat dict validation)
@@ -110,6 +138,10 @@ class ModelOptions:
                 "ST_smallest_segment",
                 "ST_largest_segment",
                 "record_state",
+                "record_every",
+                "record_arrays",
+                "record_dtype",
+                "record_to",
                 "validate_inputs",
             }
         ),
@@ -244,6 +276,10 @@ class ModelResult:
                 f"Result key '{key}' is deprecated, use '{new_name}' instead.",
                 DeprecationWarning,
                 stacklevel=2,
+            )
+        if key not in self._data and (key in RECORDABLE_ARRAYS or key in self._DEPRECATED):
+            raise KeyError(
+                f"Result '{key}' was not recorded in this run. Include it in the record_arrays option to record it."
             )
         return self._data[key]
 
@@ -404,6 +440,42 @@ class Model:
                 f"record_state must be True, False, or the name of a boolean column in data_df, "
                 f"got {opts.record_state!r}"
             )
+        if opts.record_every is not None:
+            if isinstance(opts.record_state, str):
+                raise ValueError(
+                    "record_every cannot be combined with a record_state column name; "
+                    "use one or the other to choose which timesteps to record"
+                )
+            if not isinstance(opts.record_every, (int, np.integer)) or opts.record_every < 1:
+                raise ValueError(f"record_every must be a positive integer, got {opts.record_every!r}")
+            # Record the state at the end of every k-th timestep
+            self._index_ts = np.arange(opts.record_every - 1, self._timeseries_length, opts.record_every)
+        if opts.record_dtype not in ("float64", "float32"):
+            raise ValueError(f"record_dtype must be 'float64' or 'float32', got {opts.record_dtype!r}")
+        if opts.record_arrays == "all":
+            record_set = set(RECORDABLE_ARRAYS)
+        else:
+            if isinstance(opts.record_arrays, str):
+                raise TypeError(
+                    f"record_arrays must be 'all' or an iterable of array names, got {opts.record_arrays!r}"
+                )
+            record_set = set(opts.record_arrays)
+            unknown = record_set - RECORDABLE_ARRAYS
+            if unknown:
+                raise ValueError(
+                    f"Unknown record_arrays entries: {sorted(unknown)}. Valid names: {sorted(RECORDABLE_ARRAYS)}"
+                )
+            if "water_balance" in record_set and not {"sT", "pQ"} <= record_set:
+                raise ValueError(
+                    "record_arrays: 'water_balance' requires 'sT' and 'pQ' to also be recorded "
+                    "(it is computed from them)"
+                )
+            if "solute_balance" in record_set and not {"mT", "mQ", "mR"} <= record_set:
+                raise ValueError(
+                    "record_arrays: 'solute_balance' requires 'mT', 'mQ' and 'mR' to also be recorded "
+                    "(it is computed from them)"
+                )
+        self._record_set = frozenset(record_set)
 
     def __repr__(self):
         """Creates a repr for the model"""
@@ -831,6 +903,12 @@ class Model:
         # Which timesteps to record (depends on record_state option)
         index_ts = self._index_ts
 
+        # Which arrays to record (solute arrays are dropped when no solutes)
+        record_set = set(self._record_set)
+        if self._numsol == 0:
+            record_set -= {"mT", "mQ", "mR", "solute_balance"}
+        record_dir = os.fspath(opts.record_to) if opts.record_to is not None else None
+
         # Truncate initial conditions to max_age
         sT_init = sT_init[:max_age]
         mT_init = mT_init[:max_age, :]
@@ -869,12 +947,16 @@ class Model:
             len(index_ts),
             nC_total,
             nargs_total,
+            record_to=record_dir,
+            record_arrays=frozenset(record_set),
+            record_dtype=opts.record_dtype,
         )
         sT, pQ, WaterBalance, mT, mQ, mR, C_Q, dsTdSj, dmTdSj, dCdSj, SoluteBalance = fresult
 
         # --- 6. Store results ---
-        # Solver arrays use (timestep, ..., age) ordering; moveaxis converts
-        # the last axis (age) to the first so Python arrays are (age, timestep, ...).
+        # Solver arrays are already age-first: (max_age, n_recorded_steps, ...).
+        # Only arrays selected via record_arrays are present; the Jacobian
+        # entries are singleton placeholders (not computed by the Numba solver).
         result_data = {}
         if self._numsol > 0:
             result_data["C_Q"] = C_Q
@@ -883,77 +965,107 @@ class Model:
                 for iflux, flux in enumerate(self._fluxorder):
                     colname = sol + " --> " + flux
                     self._data_df[colname] = C_Q[:, iflux, isol]
-        result_data.update(
-            {
-                "sT": np.moveaxis(sT, -1, 0),
-                "pQ": np.moveaxis(pQ, -1, 0),
-                # snake_case canonical name
-                "water_balance": np.moveaxis(WaterBalance, -1, 0),
-                # deprecated camelCase alias
-                "WaterBalance": np.moveaxis(WaterBalance, -1, 0),
-                "dsTdSj": np.moveaxis(dsTdSj, -1, 0),
-            }
-        )
+        if "sT" in record_set:
+            result_data["sT"] = sT
+        if "pQ" in record_set:
+            result_data["pQ"] = pQ
+        if "water_balance" in record_set:
+            # snake_case canonical name + deprecated camelCase alias
+            result_data["water_balance"] = WaterBalance
+            result_data["WaterBalance"] = WaterBalance
+        result_data["dsTdSj"] = dsTdSj
         if self._numsol > 0:
-            sb = np.moveaxis(SoluteBalance, -1, 0)
-            result_data.update(
-                {
-                    "mT": np.moveaxis(mT, -1, 0),
-                    "mQ": np.moveaxis(mQ, -1, 0),
-                    "mR": np.moveaxis(mR, -1, 0),
-                    # snake_case canonical name
-                    "solute_balance": sb,
-                    # deprecated camelCase alias
-                    "SoluteBalance": sb,
-                    "dmTdSj": np.moveaxis(dmTdSj, -1, 0),
-                    "dCdSj": dCdSj,
-                }
-            )
+            if "mT" in record_set:
+                result_data["mT"] = mT
+            if "mQ" in record_set:
+                result_data["mQ"] = mQ
+            if "mR" in record_set:
+                result_data["mR"] = mR
+            if "solute_balance" in record_set:
+                result_data["solute_balance"] = SoluteBalance
+                result_data["SoluteBalance"] = SoluteBalance
+            result_data["dmTdSj"] = dmTdSj
+            result_data["dCdSj"] = dCdSj
         self._result = ModelResult(result_data)
 
+        # --- 7. Persist run metadata alongside disk-backed state ---
+        if record_dir is not None:
+            self._write_run_metadata(record_dir, record_set)
+
+    def _write_run_metadata(self, record_dir: str, record_set: set) -> None:
+        """Make a ``record_to`` directory self-describing and reloadable."""
+        from datetime import datetime, timezone
+
+        opts = self._options_obj
+        np.save(os.path.join(record_dir, "index_ts.npy"), self._index_ts)
+        if self._numsol > 0:
+            np.save(os.path.join(record_dir, "C_Q.npy"), np.asarray(self._result["C_Q"]))
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            mesas_version = _pkg_version("mesas")
+        except Exception:
+            mesas_version = "unknown"
+        meta = {
+            "format": "mesas-run-v1",
+            "mesas_version": mesas_version,
+            "created": datetime.now(timezone.utc).isoformat(),
+            "dt": opts.dt,
+            "n_substeps": opts.n_substeps,
+            "num_scheme": opts.num_scheme,
+            "max_age": int(self._max_age),
+            "timeseries_length": int(self._timeseries_length),
+            "num_recorded_steps": int(len(self._index_ts)),
+            "fluxorder": list(self._fluxorder),
+            "solorder": list(self._solorder),
+            "record_dtype": opts.record_dtype,
+            "record_arrays": sorted(record_set),
+            "arrays": {name: list(self._result[name].shape) for name in sorted(record_set)},
+        }
+        with open(os.path.join(record_dir, "mesas_run.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+
+    @staticmethod
+    def load_state(record_dir: str) -> ModelResult:
+        """Reload recorded state from a ``record_to`` directory.
+
+        The arrays are opened as read-only memory-maps, so this is cheap
+        even for very large runs. Returns a :class:`ModelResult` with the
+        recorded arrays plus ``C_Q``, ``index_ts``, and ``run_metadata``
+        (the contents of ``mesas_run.json``).
+        """
+        record_dir = os.fspath(record_dir)
+        meta_path = os.path.join(record_dir, "mesas_run.json")
+        if not os.path.exists(meta_path):
+            raise FileNotFoundError(
+                f"No mesas_run.json found in {record_dir!r} — was this directory "
+                "created by running a Model with record_to set?"
+            )
+        with open(meta_path) as f:
+            meta = json.load(f)
+        data: dict[str, Any] = {"run_metadata": meta}
+        for name in meta.get("record_arrays", []):
+            path = os.path.join(record_dir, name + ".npy")
+            if os.path.exists(path):
+                data[name] = np.load(path, mmap_mode="r")
+        # deprecated camelCase aliases
+        if "water_balance" in data:
+            data["WaterBalance"] = data["water_balance"]
+        if "solute_balance" in data:
+            data["SoluteBalance"] = data["solute_balance"]
+        for extra in ("C_Q", "index_ts"):
+            path = os.path.join(record_dir, extra + ".npy")
+            if os.path.exists(path):
+                data[extra] = np.load(path, mmap_mode="r")
+        return ModelResult(data)
+
     def get_jacobian(self, mode="segment", logtransform=True):
-        J = None
-        self.jacobian = {}
-        for isol, sol in enumerate(self._solorder):
-            if "observations" in self.solute_parameters[sol]:
-                self.jacobian[sol] = {}
-                param_offset = 0
-                for isolflux, solflux in enumerate(self._fluxorder):
-                    if solflux in self.solute_parameters[sol]["observations"]:
-                        J_seg = None
-                        for iflux, flux in enumerate(self._comp2learn_fluxorder):
-                            for label in self._components_to_learn[flux]:
-                                n_breakpoints = len(self.sas_specs[flux].components[label].sas_fun[0].P)
-                                J_S = np.squeeze(
-                                    self.result["dCdSj"][:, param_offset : param_offset + n_breakpoints, isolflux, isol]
-                                )
-                                if mode == "endpoint":
-                                    pass
-                                elif mode == "segment":
-                                    # To get the derivative with respect to the segment length, we add up the derivative w.r.t. the
-                                    # endpoints that would be displaced by varying that segment
-                                    endpoint_to_segment = np.triu(np.ones(n_breakpoints), k=0)
-                                    J_S = np.dot(endpoint_to_segment, J_S.T).T
-                                    if logtransform:
-                                        J_S = J_S * self.sas_specs[flux].components[label].sas_fun[0]._parameter_list
-                                if J_seg is None:
-                                    J_seg = J_S
-                                else:
-                                    J_seg = np.c_[J_seg, J_S]
-                            PQ = np.sum(self.result["pQ"][:, :, iflux], axis=0)
-                            J_old = 1 - PQ
-                            J_old_sol = np.zeros((self._timeseries_length, self._numsol))
-                            J_old_sol[:, list(self._solorder).index(sol)] = J_old.T
-                            J_sol = np.c_[J_seg, J_old_sol]
-                        if J is None:
-                            J = J_sol
-                        else:
-                            J = np.concatenate((J, J_sol), axis=0)
-                        self.jacobian[sol][flux] = {}
-                        self.jacobian[sol][flux]["seg"] = J_seg
-                        self.jacobian[sol][flux]["C_old"] = J_old
-                    param_offset += n_breakpoints
-        return J
+        """Not available: the Numba solver does not compute Jacobian arrays."""
+        raise NotImplementedError(
+            "Model.get_jacobian requires the solver's Jacobian arrays, which the "
+            "Numba solver does not compute. Use numerical jacobians instead "
+            "(e.g. mesas.me.fit_model with jacobian_mode='numerical')."
+        )
 
     def get_residuals(self):
         residuals = None

@@ -1,7 +1,10 @@
 # Spec: reducing memory overhead of `record_state=True` runs
 
-Status: draft for review · Target: post-2.0.0 minor release (with one
-bug-level fix worth shipping in 2.0.0 itself — see O1)
+Status: **O1–O5 implemented 2026-07-07** (O6/O7 held in reserve as planned).
+Shipped: `record_every`, `record_arrays`, `record_dtype`, `record_to`
+options; `Model.load_state`; dead Jacobian placeholders removed; solver
+output layout is now natively age-first (the `moveaxis` in `model.py` is
+gone). All open questions resolved — see end of document.
 
 ## Problem
 
@@ -261,15 +264,21 @@ modes; only the backing storage differs.
   benchmarked on SSD, documented.
 - Windows/macOS/Linux CI coverage for memmap file lifecycle.
 
-## Open questions
+## Open questions — resolved 2026-07-07
 
-1. Should `record_to` also persist run metadata (config JSON, dt, index)
-   alongside the `.npy` files so a directory is self-describing/reloadable
-   (`Model.load_state("rundir/")`)? Leaning yes — cheap and makes the
-   directory a shareable artifact.
-2. Default `record_arrays`: keep `"all"` for backward compatibility, or
-   default to `{"sT","pQ"}` in 3.0 with a deprecation note? (2.1 must keep
-   `"all"`.)
-3. Is float32 acceptable for `mT`/`mQ` in evapoconcentration problems with
-   extreme concentration ratios? Needs one numerical experiment before
-   documenting the recommendation.
+1. **Yes** — implemented. `record_to` directories contain `mesas_run.json`
+   (version, dt, orders, shapes, dtype), `index_ts.npy`, and `C_Q.npy`
+   alongside the state arrays, and reload via `Model.load_state("rundir/")`
+   as read-only memmaps.
+2. **Yes** — `record_arrays` defaults to `"all"` through the 2.x series;
+   revisit the `{"sT","pQ"}` default with a deprecation note in 3.0.
+3. **Yes, float32 is acceptable for state arrays** — experiment run
+   2026-07-07 (strong evapoconcentration: half of influx evaporates with
+   alpha=0, input concentrations spanning 6 orders of magnitude, small
+   storage, n_substeps=4): max relative error of float32-recorded sT/mT/mQ
+   vs float64 is 1–3×10⁻⁷, i.e. float32 machine epsilon — no error
+   amplification from the accumulation pattern. The balance *diagnostics*
+   are the only casualty (water 2×10⁻⁷ vs 2×10⁻¹⁶; solute 1×10⁻⁴ vs
+   4×10⁻¹³): documented — use float64 runs for closure checks. `C_Q` is
+   bit-identical (computed independently in float64). Regression-tested in
+   `test/test_record_options.py`.
