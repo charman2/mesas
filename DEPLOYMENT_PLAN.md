@@ -22,8 +22,11 @@ and gives clean semver going forward.
 
 1. Push `develop` to GitHub; confirm the new pip-based CI matrix
    (`.github/workflows/tests.yml`) is green on all OS/Python combinations.
-2. Read the Docs: confirm the project points at the root `.readthedocs.yaml`,
-   and enable a build for `develop` (or a `latest` build tracking it).
+2. Read the Docs: activate `develop` as an *additional, non-default* version
+   (Admin → Versions), served at `/en/develop/`. Do NOT change the default
+   branch or default version — the landing docs must keep describing the
+   stable v1.0 that default installs deliver, just as the beta packages sit
+   behind an opt-in label/flag. At GA, point the default at the release tag.
 3. Fix the README claim that PyPI hosts v1.0 (it hosts nothing).
 
 ## Step 2 — beta release on PyPI
